@@ -60,25 +60,15 @@ Environment:
 |-----------|---------|
 | `POCKETBASE_URL` | `http://app:8090` |
 
-## Productie (GHCR)
+## Productie (GHCR) en Dockhand
 
-Zelfde patroon als Tracknote:
+Voor **Dockhand** (stack plakken of Git zonder build): gebruik **`compose.dockhand.yaml`** in de repo-root. Die file heeft **geen** `build:` — alleen kant-en-klare images van GHCR.
 
-```yaml
-services:
-  app:
-    image: ghcr.io/s4ndyp/dyncompare:latest
-    ports:
-      - "8097:8090"
-    volumes:
-      - dyncompare_data:/app/pb_data
-  sync:
-    image: ghcr.io/s4ndyp/dyncompare/sync:latest
-    ports:
-      - "8098:8091"
-    environment:
-      POCKETBASE_URL: http://app:8090
-```
+1. Nieuwe stack → plak de inhoud van `compose.dockhand.yaml`, of koppel Git repo `s4ndyp/dyncompare` met compose-pad **`compose.dockhand.yaml`** (relatief pad, **geen** leading `/`).
+2. Deploy. App: poort **8097**, sync: **8098**.
+3. Pull mislukt (401 / manifest unknown)? Zet de GHCR-packages **public** onder GitHub → Packages, of voeg **ghcr.io** credentials toe in Dockhand.
+
+Lokaal ontwikkelen blijft `docker compose up -d --build` met `docker-compose.yml` (bouwt uit bron).
 
 ## Berekening (kort)
 

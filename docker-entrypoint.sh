@@ -6,4 +6,4 @@ exec /usr/local/bin/pocketbase serve \
   --dir="/app/pb_data" \
   --publicDir="/app/pb_public" \
   --migrationsDir="/app/pb_migrations" \
-  --automigrate=false
+  --automigrate=true

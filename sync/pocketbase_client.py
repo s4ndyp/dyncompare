@@ -45,7 +45,7 @@ class PocketBaseClient:
         return items
 
     async def get_settings(self) -> dict[str, Any]:
-        rows = await self.list_all("settings", sort="created")
+        rows = await self.list_all("settings", sort="id")
         if not rows:
             raise RuntimeError("Geen settings record in PocketBase")
         return rows[0]

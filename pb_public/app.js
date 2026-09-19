@@ -96,8 +96,26 @@ function pbFilterFrom(date) {
   return iso.slice(0, 19).replace("T", " ");
 }
 
+const DEFAULT_SETTINGS = {
+  label: "Standaard",
+  fixed_tariff_eur_kwh: 0.28,
+  market_markup_eur_kwh: 0,
+  vat_rate: 0,
+  sensor_import_t1: "sensor.p1_energy_consumption_tarif_1",
+  sensor_import_t2: "sensor.p1_energy_consumption_tarif_2",
+  sensor_export_t1: "sensor.p1_energy_production_tarif_1",
+  sensor_export_t2: "sensor.p1_energy_production_tarif_2",
+};
+
 async function loadSettings() {
-  const rows = await listAll("settings", { sort: "created" });
+  let rows = await listAll("settings", { sort: "id" });
+  if (!rows.length) {
+    const created = await pbRequest("/api/collections/settings/records", {
+      method: "POST",
+      body: JSON.stringify(DEFAULT_SETTINGS),
+    });
+    rows = [created];
+  }
   state.settings = rows[0] || null;
 }
 

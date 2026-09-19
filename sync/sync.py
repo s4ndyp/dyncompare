@@ -65,6 +65,7 @@ async def run_sync(
 
     price_saved = 0
     price_stat = (settings.get("price_statistic_id") or "").strip()
+    ha_price_rows: list[dict[str, Any]] = []
     if price_stat:
         for period in ("5minute", "hour"):
             price_stats = ha.statistics_during_period(
@@ -76,9 +77,8 @@ async def run_sync(
             )
             series = price_stats.get(price_stat) or []
             interval_minutes = 5 if period == "5minute" else 60
-            rows = []
             for start_ms, mean_price in HomeAssistantClient.values_by_start(series, "mean").items():
-                rows.append(
+                ha_price_rows.append(
                     {
                         "period_start": _ms_to_iso(start_ms),
                         "price_eur_kwh": round(mean_price, 6),
@@ -86,9 +86,33 @@ async def run_sync(
                         "interval_minutes": interval_minutes,
                     }
                 )
-            if rows:
-                price_saved += await pb.batch_upsert_price_slots(rows)
+            if ha_price_rows:
                 break
+
+        if not ha_price_rows and "." in price_stat:
+            merged: dict[int, float] = {}
+            chunk_start = start
+            while chunk_start < end:
+                chunk_end = min(end, chunk_start + timedelta(days=14))
+                history = ha.history_during_period(
+                    [price_stat],
+                    _iso_ha(chunk_start),
+                    _iso_ha(chunk_end),
+                )
+                merged.update(HomeAssistantClient.hourly_means_from_history(history))
+                chunk_start = chunk_end
+            for start_ms, mean_price in sorted(merged.items()):
+                ha_price_rows.append(
+                    {
+                        "period_start": _ms_to_iso(start_ms),
+                        "price_eur_kwh": round(mean_price, 6),
+                        "source": "home_assistant",
+                        "interval_minutes": 60,
+                    }
+                )
+
+        if ha_price_rows:
+            price_saved += await pb.batch_upsert_price_slots(ha_price_rows)
 
     if include_market_prices:
         start_day = start.date()

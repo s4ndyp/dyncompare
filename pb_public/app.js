@@ -147,10 +147,24 @@ function buildPriceIndex(priceRows) {
     .filter((p) => p.start != null && Number.isFinite(p.price))
     .sort((a, b) => a.start - b.start);
 
-  const preferred = slots.filter((s) => s.source === "home_assistant");
-  const market = slots.filter((s) => s.source === "market");
-  const use = preferred.length ? preferred : market.length ? market : slots;
-  return use;
+  // Combineer markt (Energy-Charts) en HA: per tijdstip wint HA, rest vult gaten.
+  const byStart = new Map();
+  for (const slot of slots) {
+    const existing = byStart.get(slot.start);
+    if (!existing || slot.source === "home_assistant") {
+      byStart.set(slot.start, slot);
+    }
+  }
+  return [...byStart.values()].sort((a, b) => a.start - b.start);
+}
+
+function priceSourceCounts(priceRows) {
+  const counts = { market: 0, home_assistant: 0, manual: 0, other: 0 };
+  for (const row of priceRows) {
+    const key = row.source in counts ? row.source : "other";
+    counts[key] += 1;
+  }
+  return counts;
 }
 
 function priceForHour(hourStartMs, hourKwh, priceSlots) {
@@ -326,7 +340,7 @@ function renderCompare() {
         <li>Verbruik: P1 import tarief 1 + 2 per uur uit Home Assistant statistieken.</li>
         <li>Prijzen: day-ahead NL (Energy-Charts) + optioneel HA prijssensor. Uurverbruik wordt evenredig over prijs-slots in dat uur verdeeld.</li>
         <li>Opslag/belasting: stel <strong>markt-opslag</strong> en BTW in onder Instellingen voor vergelijkbare all-in tarieven.</li>
-        ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch).</li>` : ""}
+        ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch). Laat het veld Nordpool/HA-prijs leeg en synchroniseer opnieuw om NL day-ahead (Energy-Charts) te gebruiken — zie tab Data.</li>` : ""}
       </ul>
       <button type="button" class="btn primary" id="syncBtn">Synchroniseer met Home Assistant</button>
     </section>
@@ -347,13 +361,16 @@ function renderData() {
   const summary = computeSummary();
   const last = state.consumption[state.consumption.length - 1];
   const first = state.consumption[0];
+  const src = priceSourceCounts(state.prices);
 
   appEl.innerHTML = `
     <section class="card">
       <h2 class="card-title">Dataset</h2>
       <dl class="kv">
         <dt>Uurrecords verbruik</dt><dd>${state.consumption.length}</dd>
-        <dt>Prijs-slots</dt><dd>${state.prices.length} (${summary.priceSlotCount} gebruikt)</dd>
+        <dt>Prijs-slots</dt><dd>${state.prices.length} (${summary.priceSlotCount} gebruikt na merge)</dd>
+        <dt>Markt (Energy-Charts)</dt><dd>${src.market} slots</dd>
+        <dt>Home Assistant prijs</dt><dd>${src.home_assistant} slots</dd>
         <dt>Eerste uur</dt><dd>${first ? first.period_start : "—"}</dd>
         <dt>Laatste uur</dt><dd>${last ? last.period_start : "—"}</dd>
         <dt>Laatste sync</dt><dd>${state.settings?.last_sync_at || "—"}</dd>
@@ -402,9 +419,10 @@ function renderSettings() {
       <label>Export tarief 2
         <input name="sensor_export_t2" value="${s.sensor_export_t2 || "sensor.p1_energy_production_tarif_2"}" />
       </label>
-      <label>Optioneel: HA prijs-statistic ID (kwartier/uur)
-        <input name="price_statistic_id" value="${s.price_statistic_id || ""}" placeholder="sensor.current_electricity_price" />
+      <label>Optioneel: Nordpool / HA-prijs (entity of statistic ID)
+        <input name="price_statistic_id" value="${s.price_statistic_id || ""}" placeholder="sensor.nordpool_kwh" />
       </label>
+      <p class="muted small">Leeg laten = automatisch NL day-ahead via Energy-Charts (maanden historie, geen Nordpool nodig). Alleen invullen als je eigen HA-prijs wilt; dan moet de sensor in de <strong>statistieken</strong> staan (Ontwikkelhulpmiddelen → Statistieken) of de sync leest de state-historie.</p>
 
       <input type="hidden" name="label" value="${s.label || "Standaard"}" />
       <button type="submit" class="btn primary">Opslaan</button>

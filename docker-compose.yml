@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    image: ghcr.io/s4ndyp/dyncompare:latest
+    pull_policy: build
+    container_name: dyncompare
+    restart: unless-stopped
+    ports:
+      - "8097:8090"
+    volumes:
+      - dyncompare_data:/app/pb_data
+
+  sync:
+    build: ./sync
+    container_name: dyncompare-sync
+    restart: unless-stopped
+    ports:
+      - "8098:8091"
+    environment:
+      POCKETBASE_URL: http://app:8090
+      TZ: Europe/Amsterdam
+    depends_on:
+      - app
+
+volumes:
+  dyncompare_data:

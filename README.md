@@ -29,7 +29,9 @@ docker compose up -d --build
 1. Open **Instellingen** → vul **Home Assistant URL** en **long-lived access token** in.  
 2. Controleer de vier P1-sensor-entity_id’s (vooringevuld).  
 3. Pas je **vaste €/kWh** aan (standaard 0,28).  
-4. Tik **Synchroniseer met Home Assistant** op het tabblad Vergelijk.
+4. Tik **Synchroniseer met Home Assistant** op het tabblad Vergelijk. De app toont een **voortgangsbalk** tot de sync klaar is (kan enkele minuten duren bij ~1 jaar data).
+
+**Vaker syncen** mag: per uur/prijs-slot wordt de bestaande rij **bijgewerkt** (unique index op `period_start`), geen dubbele records.
 
 ## Home Assistant
 

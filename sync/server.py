@@ -39,4 +39,12 @@ async def sync(body: SyncRequest | None = None) -> dict:
             include_market_prices=body.include_market_prices,
         )
     except Exception as exc:  # noqa: BLE001 — API boundary
+        try:
+            settings = await pb.get_settings()
+            await pb.update_settings(
+                settings["id"],
+                {"last_sync_message": f"Mislukt: {exc}"},
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=400, detail=str(exc)) from exc

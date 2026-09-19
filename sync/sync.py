@@ -34,6 +34,11 @@ async def run_sync(
     if not ha_url or not ha_token:
         raise RuntimeError("Vul Home Assistant URL en token in via Instellingen")
 
+    await pb.update_settings(
+        settings["id"],
+        {"last_sync_message": "Bezig: verbruik ophalen uit Home Assistant…"},
+    )
+
     sensors = {
         "import_t1": settings.get("sensor_import_t1") or "sensor.p1_energy_consumption_tarif_1",
         "import_t2": settings.get("sensor_import_t2") or "sensor.p1_energy_consumption_tarif_2",
@@ -62,6 +67,15 @@ async def run_sync(
 
     consumption_rows = merge_hourly_consumption(import_t1, import_t2, export_t1, export_t2)
     consumption_saved = await pb.batch_upsert_consumption(consumption_rows)
+
+    await pb.update_settings(
+        settings["id"],
+        {
+            "last_sync_message": (
+                f"Bezig: {consumption_saved} uren verbruik opgeslagen, prijzen ophalen…"
+            ),
+        },
+    )
 
     price_saved = 0
     price_stat = (settings.get("price_statistic_id") or "").strip()

@@ -11,18 +11,93 @@ const state = {
   consumption: [],
   prices: [],
   loading: false,
+  syncing: false,
+  syncPollId: null,
+  syncStartedAt: null,
 };
 
 const appEl = document.getElementById("app");
 const pageTitle = document.getElementById("pageTitle");
 const periodLabel = document.getElementById("periodLabel");
+const refreshBtn = document.getElementById("refreshBtn");
+const syncBanner = document.getElementById("syncBanner");
+const syncBannerTitle = document.getElementById("syncBannerTitle");
+const syncBannerDetail = document.getElementById("syncBannerDetail");
 
-function toast(message) {
+function toast(message, durationMs = 3200) {
   const el = document.createElement("div");
   el.className = "toast";
   el.textContent = message;
   document.getElementById("toasts").appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+  setTimeout(() => el.remove(), durationMs);
+}
+
+function formatSyncElapsed(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m} min ${s} s` : `${s} s`;
+}
+
+function formatSyncTimestamp(value) {
+  const d = parsePbDate(value);
+  if (!d) return "—";
+  return new Intl.DateTimeFormat("nl-NL", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(d);
+}
+
+function setSyncBanner(mode, title, detail) {
+  if (!syncBanner) return;
+  syncBanner.classList.remove("is-hidden", "is-ok", "is-error");
+  if (mode === "hidden") {
+    syncBanner.classList.add("is-hidden");
+    syncBanner.setAttribute("aria-busy", "false");
+    return;
+  }
+  if (mode === "ok") syncBanner.classList.add("is-ok");
+  if (mode === "error") syncBanner.classList.add("is-error");
+  syncBanner.setAttribute("aria-busy", mode === "busy" ? "true" : "false");
+  if (syncBannerTitle) syncBannerTitle.textContent = title;
+  if (syncBannerDetail) syncBannerDetail.textContent = detail || "";
+}
+
+function setSyncControlsDisabled(disabled) {
+  if (refreshBtn) refreshBtn.disabled = disabled;
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.disabled = disabled;
+  });
+  const syncBtn = document.getElementById("syncBtn");
+  if (syncBtn) {
+    syncBtn.disabled = disabled;
+    syncBtn.textContent = disabled ? "Bezig met synchroniseren…" : "Synchroniseer met Home Assistant";
+  }
+}
+
+function stopSyncPoll() {
+  if (state.syncPollId != null) {
+    clearInterval(state.syncPollId);
+    state.syncPollId = null;
+  }
+}
+
+function startSyncPoll() {
+  stopSyncPoll();
+  state.syncPollId = setInterval(async () => {
+    if (!state.syncing) return;
+    try {
+      await loadSettings();
+      const msg = (state.settings?.last_sync_message || "").trim();
+      const elapsed = formatSyncElapsed(Date.now() - (state.syncStartedAt || Date.now()));
+      const detail = msg.startsWith("Bezig:")
+        ? `${msg} (${elapsed})`
+        : `Nog bezig… (${elapsed})`;
+      setSyncBanner("busy", "Synchroniseren", detail);
+    } catch (_) {
+      /* poll mag falen zonder sync te stoppen */
+    }
+  }, 2000);
 }
 
 function euro(n, digits = 2) {
@@ -238,20 +313,54 @@ function syncServiceUrl() {
 }
 
 async function triggerSync() {
+  if (state.syncing) return;
+
   const url = `${syncServiceUrl()}/sync`;
-  toast("Synchroniseren…");
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ days: PERIODS.year.days, include_market_prices: true }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.detail || data.message || `Sync mislukt (${res.status})`);
+  state.syncing = true;
+  state.syncStartedAt = Date.now();
+  setSyncControlsDisabled(true);
+  setSyncBanner(
+    "busy",
+    "Synchroniseren",
+    "Verbruik en prijzen ophalen (kan enkele minuten duren)…"
+  );
+  startSyncPoll();
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ days: PERIODS.year.days, include_market_prices: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || data.message || `Sync mislukt (${res.status})`);
+    }
+    await loadSettings();
+    await loadData();
+    const doneMsg = data.message || state.settings?.last_sync_message || "Sync voltooid";
+    const when = formatSyncTimestamp(state.settings?.last_sync_at);
+    setSyncBanner("ok", "Synchronisatie voltooid", `${doneMsg}${when !== "—" ? ` · ${when}` : ""}`);
+    toast(doneMsg, 7000);
+    render();
+    setTimeout(() => {
+      if (!state.syncing) setSyncBanner("hidden");
+    }, 12000);
+  } catch (err) {
+    const message = err.message || "Sync mislukt";
+    setSyncBanner("error", "Synchronisatie mislukt", message);
+    toast(message, 8000);
+    try {
+      await loadSettings();
+    } catch (_) {
+      /* ignore */
+    }
+    render();
+  } finally {
+    state.syncing = false;
+    stopSyncPoll();
+    setSyncControlsDisabled(false);
   }
-  toast(data.message || "Sync voltooid");
-  await loadSettings();
-  await loadData();
 }
 
 async function saveSettings(form) {
@@ -328,7 +437,9 @@ function renderCompare() {
         <li>Opslag/belasting: stel <strong>markt-opslag</strong> en BTW in onder Instellingen voor vergelijkbare all-in tarieven.</li>
         ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch).</li>` : ""}
       </ul>
-      <button type="button" class="btn primary" id="syncBtn">Synchroniseer met Home Assistant</button>
+      <p class="muted small sync-meta">Laatste sync: ${formatSyncTimestamp(state.settings?.last_sync_at)} · ${state.settings?.last_sync_message || "—"}</p>
+      <button type="button" class="btn primary" id="syncBtn" ${state.syncing ? "disabled" : ""}>${state.syncing ? "Bezig met synchroniseren…" : "Synchroniseer met Home Assistant"}</button>
+      <p class="muted small">Vaker syncen is veilig: per uur/prijs-slot wordt bestaande data bijgewerkt (geen dubbele rijen).</p>
     </section>
   `;
 
@@ -339,7 +450,7 @@ function renderCompare() {
     });
   });
   document.getElementById("syncBtn")?.addEventListener("click", () => {
-    triggerSync().catch((e) => toast(e.message));
+    triggerSync();
   });
 }
 
@@ -449,6 +560,18 @@ document.querySelectorAll(".tab").forEach((tab) => {
   });
 });
 
-document.getElementById("refreshBtn").addEventListener("click", () => refresh());
+refreshBtn?.addEventListener("click", () => {
+  if (!state.syncing) refresh();
+});
 
-refresh();
+async function resumeSyncBannerIfBusy() {
+  const msg = (state.settings?.last_sync_message || "").trim();
+  if (!msg.startsWith("Bezig:")) return;
+  setSyncBanner(
+    "busy",
+    "Synchroniseren (mogelijk nog bezig)",
+    `${msg} — wacht tot dit verandert of start opnieuw`
+  );
+}
+
+refresh().then(() => resumeSyncBannerIfBusy());

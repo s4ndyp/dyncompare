@@ -45,9 +45,13 @@ Optioneel veld **Nordpool / HA-prijs** in Instellingen:
 
 In de app-tab **Data** zie je hoeveel prijs-slots **Markt** vs **Home Assistant** zijn.
 
-### Energy-Charts geblokkeerd?
+### Energy-Charts geblokkeerd of 429?
 
-Sommige netwerken/IP’s krijgen timeout of geen antwoord van `api.energy-charts.info`. De sync probeert chunks van **7 dagen** met retries; als dat faalt, gebruikt hij **ENTSO-E** (officiële Europese day-ahead, maanden/jaren historie):
+Energy-Charts beperkt het aantal requests (**HTTP 429 Too Many Requests**). De sync gebruikt chunks van **7 dagen**, **geen** snelle retries bij 429, en schakelt daarna over op **ENTSO-E** voor de rest van de run.
+
+Optioneel: `MARKET_PRICE_SOURCE=entsoe` op de sync-container om Energy-Charts helemaal over te slaan.
+
+Gratis **ENTSO-E** fallback (officiële Europese day-ahead, maanden/jaren historie):
 
 1. Gratis account: https://transparency.entsoe.eu/ → login → **My Account** → **API Key**
 2. Zet in de **sync**-container: `ENTSOE_API_TOKEN=jouw-key` (Dockhand: environment bij service `sync`)
@@ -83,7 +87,8 @@ Environment:
 | Variabele | Default |
 |-----------|---------|
 | `POCKETBASE_URL` | `http://app:8090` |
-| `ENTSOE_API_TOKEN` | leeg — fallback marktprijzen via ENTSO-E |
+| `ENTSOE_API_TOKEN` | leeg — fallback marktprijzen via ENTSO-E (aanbevolen bij 429) |
+| `MARKET_PRICE_SOURCE` | `auto` — `entsoe` of `energy-charts` |
 
 ## Productie (GHCR) en Dockhand
 

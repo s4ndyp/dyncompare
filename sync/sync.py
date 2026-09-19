@@ -7,7 +7,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ha_client import HomeAssistantClient, merge_hourly_consumption
-from market_prices import chunk_date_ranges, fetch_nl_day_ahead_slots
+from market_prices import (
+    EnergyChartsRateLimitedError,
+    chunk_date_ranges,
+    fetch_nl_day_ahead_slots,
+)
 from pocketbase_client import PocketBaseClient
 
 AMSTERDAM = ZoneInfo("Europe/Amsterdam")
@@ -138,12 +142,15 @@ async def run_sync(
         entsoe_token = os.environ.get("ENTSOE_API_TOKEN", "").strip()
         market_rows: list[dict[str, Any]] = []
         chunks = chunk_date_ranges(start_day, end_day, chunk_days=7)
+        skip_energy_charts = False
+        chunk_pause_sec = 2.0
         for idx, (chunk_start, chunk_end) in enumerate(chunks, start=1):
+            source_hint = "ENTSO-E" if skip_energy_charts and entsoe_token else "Energy-Charts/ENTSO-E"
             await pb.update_settings(
                 settings["id"],
                 {
                     "last_sync_message": (
-                        f"Bezig: marktprijzen chunk {idx}/{len(chunks)} "
+                        f"Bezig: marktprijzen {idx}/{len(chunks)} via {source_hint} "
                         f"({chunk_start.isoformat()} → {chunk_end.isoformat()})…"
                     ),
                 },
@@ -153,12 +160,33 @@ async def run_sync(
                     chunk_start,
                     chunk_end,
                     entsoe_token=entsoe_token or None,
+                    skip_energy_charts=skip_energy_charts,
                 )
                 market_rows.extend(rows)
                 market_source = source
+            except EnergyChartsRateLimitedError as exc:
+                skip_energy_charts = True
+                chunk_pause_sec = max(chunk_pause_sec, 5.0)
+                market_errors.append(f"{chunk_start}→{chunk_end}: {exc}")
+                if entsoe_token:
+                    try:
+                        rows, source = fetch_nl_day_ahead_slots(
+                            chunk_start,
+                            chunk_end,
+                            entsoe_token=entsoe_token,
+                            skip_energy_charts=True,
+                        )
+                        market_rows.extend(rows)
+                        market_source = source
+                    except Exception as retry_exc:  # noqa: BLE001
+                        market_errors.append(f"{chunk_start}→{chunk_end} ENTSO-E: {retry_exc}")
+                else:
+                    market_errors.append(
+                        "Energy-Charts 429: zet ENTSOE_API_TOKEN op sync voor historische marktprijzen."
+                    )
             except Exception as exc:  # noqa: BLE001 — per chunk, ga door
                 market_errors.append(f"{chunk_start}→{chunk_end}: {exc}")
-            time.sleep(0.35)
+            time.sleep(chunk_pause_sec)
 
         if market_rows:
             price_saved += await pb.batch_upsert_price_slots(market_rows)

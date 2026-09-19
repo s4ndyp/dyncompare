@@ -18,6 +18,20 @@ NL_EIC = "10YNL----------L"
 RESOLUTION_RE = re.compile(r"PT(?:(\d+)H)?(?:(\d+)M)?", re.IGNORECASE)
 
 
+class EnergyChartsRateLimitedError(RuntimeError):
+    """Energy-Charts HTTP 429 — verder proberen verergert de blokkade."""
+
+    def __init__(self, retry_after_sec: float | None = None) -> None:
+        self.retry_after_sec = retry_after_sec
+        hint = (
+            "Energy-Charts: 429 Too Many Requests (rate limit). "
+            "Gebruik ENTSOE_API_TOKEN of wacht en sync later opnieuw."
+        )
+        if retry_after_sec is not None:
+            hint += f" Retry-After: {retry_after_sec:.0f}s."
+        super().__init__(hint)
+
+
 def _iso_utc(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -78,12 +92,24 @@ def _slots_from_energy_charts(data: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw.strip()))
+    except ValueError:
+        return None
+
+
 def fetch_energy_charts_nl(start: date, end: date) -> list[dict[str, Any]]:
     if end <= start:
         return []
     url = f"{ENERGY_CHARTS_API}?bzn=NL&start={start.isoformat()}&end={end.isoformat()}"
     with httpx.Client(timeout=90.0) as client:
         res = client.get(url)
+        if res.status_code == 429:
+            raise EnergyChartsRateLimitedError(_retry_after_seconds(res))
         res.raise_for_status()
         data = res.json()
     rows = _slots_from_energy_charts(data)
@@ -184,26 +210,35 @@ def fetch_nl_day_ahead_slots(
     end: date,
     *,
     entsoe_token: str | None = None,
+    skip_energy_charts: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Haal NL day-ahead op. Probeert Energy-Charts, daarna ENTSO-E."""
+    """Haal NL day-ahead op. Energy-Charts tenzij overgeslagen (429), anders ENTSO-E."""
     token = (entsoe_token or os.environ.get("ENTSOE_API_TOKEN") or "").strip()
     errors: list[str] = []
+    prefer = (os.environ.get("MARKET_PRICE_SOURCE") or "auto").strip().lower()
 
-    for attempt in range(3):
+    try_energy_charts = not skip_energy_charts and prefer in ("auto", "energy-charts", "")
+    if prefer == "entsoe":
+        try_energy_charts = False
+
+    if try_energy_charts:
         try:
             rows = fetch_energy_charts_nl(start, end)
             return rows, "energy-charts"
-        except Exception as exc:  # noqa: BLE001 — probeer fallback
+        except EnergyChartsRateLimitedError as exc:
+            errors.append(str(exc))
+            # Geen snelle retries bij 429 — direct fallback.
+        except Exception as exc:  # noqa: BLE001
             errors.append(f"Energy-Charts: {exc}")
-            time.sleep(1.0 + attempt)
+            time.sleep(2.0)
 
-    if token:
+    if token and (not try_energy_charts or prefer != "energy-charts" or errors):
         try:
             rows = fetch_entsoe_nl_day_ahead(start, end, token)
             return rows, "entsoe"
         except Exception as exc:  # noqa: BLE001
             errors.append(f"ENTSO-E: {exc}")
-    else:
+    elif not token and errors:
         errors.append(
             "ENTSO-E: geen token — zet ENTSOE_API_TOKEN in de sync-container (gratis op transparency.entsoe.eu)"
         )

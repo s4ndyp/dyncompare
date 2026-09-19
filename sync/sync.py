@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -128,15 +130,48 @@ async def run_sync(
         if ha_price_rows:
             price_saved += await pb.batch_upsert_price_slots(ha_price_rows)
 
+    market_source = ""
+    market_errors: list[str] = []
     if include_market_prices:
         start_day = start.date()
         end_day = (now + timedelta(days=1)).date()
-        price_rows: list[dict[str, Any]] = []
-        for chunk_start, chunk_end in chunk_date_ranges(start_day, end_day):
-            price_rows.extend(fetch_nl_day_ahead_slots(chunk_start, chunk_end))
-        price_saved += await pb.batch_upsert_price_slots(price_rows)
+        entsoe_token = os.environ.get("ENTSOE_API_TOKEN", "").strip()
+        market_rows: list[dict[str, Any]] = []
+        chunks = chunk_date_ranges(start_day, end_day, chunk_days=7)
+        for idx, (chunk_start, chunk_end) in enumerate(chunks, start=1):
+            await pb.update_settings(
+                settings["id"],
+                {
+                    "last_sync_message": (
+                        f"Bezig: marktprijzen chunk {idx}/{len(chunks)} "
+                        f"({chunk_start.isoformat()} → {chunk_end.isoformat()})…"
+                    ),
+                },
+            )
+            try:
+                rows, source = fetch_nl_day_ahead_slots(
+                    chunk_start,
+                    chunk_end,
+                    entsoe_token=entsoe_token or None,
+                )
+                market_rows.extend(rows)
+                market_source = source
+            except Exception as exc:  # noqa: BLE001 — per chunk, ga door
+                market_errors.append(f"{chunk_start}→{chunk_end}: {exc}")
+            time.sleep(0.35)
+
+        if market_rows:
+            price_saved += await pb.batch_upsert_price_slots(market_rows)
+        elif market_errors:
+            raise RuntimeError(
+                "Geen marktprijzen opgeslagen. "
+                + " | ".join(market_errors[:3])
+                + (" …" if len(market_errors) > 3 else "")
+            )
 
     message = f"{consumption_saved} uur verbruik, {price_saved} prijs-slots gesynchroniseerd"
+    if market_source:
+        message += f" (markt via {market_source})"
     await pb.update_settings(
         settings["id"],
         {

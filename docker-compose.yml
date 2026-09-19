@@ -20,6 +20,8 @@ services:
     environment:
       POCKETBASE_URL: http://app:8090
       TZ: Europe/Amsterdam
+      # Optioneel: fallback als Energy-Charts geblokkeerd is (gratis token: transparency.entsoe.eu)
+      # ENTSOE_API_TOKEN: ""
     depends_on:
       - app
 

@@ -172,6 +172,8 @@ async def run_sync(
     message = f"{consumption_saved} uur verbruik, {price_saved} prijs-slots gesynchroniseerd"
     if market_source:
         message += f" (markt via {market_source})"
+    if market_errors and market_rows:
+        message += f" — {len(market_errors)} markt-chunks mislukt (deels ingevuld)"
     await pb.update_settings(
         settings["id"],
         {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import ssl
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -82,6 +82,68 @@ class HomeAssistantClient:
             return result
         finally:
             ws.close()
+
+    def history_during_period(
+        self,
+        entity_ids: list[str],
+        start_time: str,
+        end_time: str,
+    ) -> list[list[dict[str, Any]]]:
+        ws = self._connect()
+        try:
+            result = self._call(
+                ws,
+                "history/history_during_period",
+                start_time=start_time,
+                end_time=end_time,
+                entity_ids=entity_ids,
+                minimal_response=True,
+                no_attributes=True,
+            )
+            return result if isinstance(result, list) else []
+        finally:
+            ws.close()
+
+    @staticmethod
+    def _parse_ha_time(value: str) -> datetime | None:
+        if not value:
+            return None
+        raw = value.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def hourly_means_from_history(
+        entity_histories: list[list[dict[str, Any]]],
+    ) -> dict[int, float]:
+        """Gemiddelde sensorwaarde per uur (UTC) uit state-historie."""
+        buckets: dict[int, list[float]] = {}
+        for series in entity_histories:
+            if not series:
+                continue
+            for item in series:
+                state = item.get("state")
+                if state in (None, "", "unknown", "unavailable"):
+                    continue
+                try:
+                    value = float(state)
+                except (TypeError, ValueError):
+                    continue
+                ts = item.get("last_changed") or item.get("last_updated")
+                if not isinstance(ts, str):
+                    continue
+                dt = HomeAssistantClient._parse_ha_time(ts)
+                if dt is None:
+                    continue
+                hour = dt.replace(minute=0, second=0, microsecond=0)
+                start_ms = int(hour.timestamp() * 1000)
+                buckets.setdefault(start_ms, []).append(value)
+        return {ms: sum(vals) / len(vals) for ms, vals in buckets.items() if vals}
 
     @staticmethod
     def values_by_start(

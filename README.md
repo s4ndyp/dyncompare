@@ -31,6 +31,18 @@ docker compose up -d --build
 3. Pas je **vaste €/kWh** aan (standaard 0,28).  
 4. Tik **Synchroniseer met Home Assistant** op het tabblad Vergelijk.
 
+## Dynamische prijzen (Nordpool / markt)
+
+**Standaard hoef je geen Nordpool-sensor in te vullen.** Bij elke sync haalt DynCompare **NL day-ahead** prijzen op via [Energy-Charts](https://api.energy-charts.info/) — dat is maanden aan marktprijs (EUR/kWh), los van je HA-setup.
+
+Optioneel veld **Nordpool / HA-prijs** in Instellingen:
+
+1. **Leeg laten** — alleen Energy-Charts (aanbevolen voor vergelijking “vast vs spot”).
+2. **Entity ID** (bv. `sensor.nordpool_kwh`) — sync probeert eerst **statistieken** (`recorder/statistics_during_period`); als die leeg zijn, valt hij terug op **state-historie** (werkt ook zonder lange-termijn statistieken, zolang `recorder` de sensor logt).
+3. Controleer in HA: **Ontwikkelhulpmiddelen → Statistieken** of **Geschiedenis** of je sensor data heeft. Zonder history/statistieken blijft alleen Energy-Charts over.
+
+In de app-tab **Data** zie je hoeveel prijs-slots **Markt** vs **Home Assistant** zijn. Zijn markt-slots 0 na sync, controleer netwerk/egress van de sync-container.
+
 ## Home Assistant
 
 DynCompare gebruikt de **standaard recorder** en leest **lange-termijn uurstatistieken** (`change` in kWh) voor:

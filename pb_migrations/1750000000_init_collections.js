@@ -118,22 +118,26 @@ migrate(
         {
           type: "number",
           name: "import_t1_kwh",
-          required: true,
+          required: false,
+          min: 0,
         },
         {
           type: "number",
           name: "import_t2_kwh",
-          required: true,
+          required: false,
+          min: 0,
         },
         {
           type: "number",
           name: "export_t1_kwh",
-          required: true,
+          required: false,
+          min: 0,
         },
         {
           type: "number",
           name: "export_t2_kwh",
-          required: true,
+          required: false,
+          min: 0,
         },
       ],
     });

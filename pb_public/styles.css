@@ -150,3 +150,49 @@ h1 { margin: 2px 0 0; font-size: 26px; }
   font-size: 13px;
   box-shadow: 0 8px 30px rgba(0,0,0,.35);
 }
+
+.sync-banner {
+  margin: 0 16px 8px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+}
+.sync-banner.is-hidden { display: none; }
+.sync-banner.is-ok {
+  border-color: color-mix(in srgb, var(--ok) 50%, var(--line));
+  background: color-mix(in srgb, var(--ok) 10%, var(--card));
+}
+.sync-banner.is-error {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, var(--card));
+}
+.sync-banner-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.sync-banner-title { margin: 0; font-size: 14px; font-weight: 600; }
+.sync-banner-detail { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+.sync-spinner {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: sync-spin 0.85s linear infinite;
+  flex-shrink: 0;
+}
+.sync-banner.is-ok .sync-spinner,
+.sync-banner.is-error .sync-spinner { display: none; }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
+
+.btn:disabled,
+.icon-btn:disabled,
+.tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sync-meta { margin: 0 0 12px; line-height: 1.45; }

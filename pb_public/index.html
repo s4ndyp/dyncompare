@@ -21,6 +21,16 @@
     <button class="icon-btn" id="refreshBtn" type="button" aria-label="Vernieuwen">↻</button>
   </header>
 
+  <div id="syncBanner" class="sync-banner is-hidden" role="status" aria-live="polite" aria-busy="false">
+    <div class="sync-banner-inner">
+      <span class="sync-spinner" aria-hidden="true"></span>
+      <div class="sync-banner-text">
+        <p class="sync-banner-title" id="syncBannerTitle">Synchroniseren</p>
+        <p class="sync-banner-detail" id="syncBannerDetail"></p>
+      </div>
+    </div>
+  </div>
+
   <main id="app" class="app"></main>
 
   <nav class="tabbar" aria-label="Hoofdmenu">

@@ -1,8 +1,12 @@
+# Dockhand / productie: alleen images van GHCR (geen build-context nodig).
+# Gebruik dit bij "Stack plakken" in Dockhand, of zet compose_path op dit bestand bij Git-deploy.
+#
+# Images: ghcr.io/s4ndyp/dyncompare:latest en .../sync:latest (CI op main).
+# Als pull faalt: maak het GHCR-package publiek of voeg registry-credentials toe in Dockhand.
+
 services:
   app:
-    build: .
     image: ghcr.io/s4ndyp/dyncompare:latest
-    pull_policy: build
     container_name: dyncompare
     restart: unless-stopped
     ports:
@@ -11,7 +15,6 @@ services:
       - dyncompare_data:/app/pb_data
 
   sync:
-    build: ./sync
     image: ghcr.io/s4ndyp/dyncompare/sync:latest
     container_name: dyncompare-sync
     restart: unless-stopped

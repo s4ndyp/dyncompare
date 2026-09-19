@@ -23,6 +23,7 @@ services:
     environment:
       POCKETBASE_URL: http://app:8090
       TZ: Europe/Amsterdam
+      # ENTSOE_API_TOKEN: "jouw-token"  # fallback marktprijzen
     depends_on:
       - app
 

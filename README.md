@@ -43,7 +43,21 @@ Optioneel veld **Nordpool / HA-prijs** in Instellingen:
 2. **Entity ID** (bv. `sensor.nordpool_kwh`) — sync probeert eerst **statistieken** (`recorder/statistics_during_period`); als die leeg zijn, valt hij terug op **state-historie** (werkt ook zonder lange-termijn statistieken, zolang `recorder` de sensor logt).
 3. Controleer in HA: **Ontwikkelhulpmiddelen → Statistieken** of **Geschiedenis** of je sensor data heeft. Zonder history/statistieken blijft alleen Energy-Charts over.
 
-In de app-tab **Data** zie je hoeveel prijs-slots **Markt** vs **Home Assistant** zijn. Zijn markt-slots 0 na sync, controleer netwerk/egress van de sync-container.
+In de app-tab **Data** zie je hoeveel prijs-slots **Markt** vs **Home Assistant** zijn.
+
+### Energy-Charts geblokkeerd of 429?
+
+Energy-Charts beperkt het aantal requests (**HTTP 429 Too Many Requests**). De sync gebruikt chunks van **7 dagen**, **geen** snelle retries bij 429, en schakelt daarna over op **ENTSO-E** voor de rest van de run.
+
+Optioneel: `MARKET_PRICE_SOURCE=entsoe` op de sync-container om Energy-Charts helemaal over te slaan.
+
+Gratis **ENTSO-E** fallback (officiële Europese day-ahead, maanden/jaren historie):
+
+1. Gratis account: https://transparency.entsoe.eu/ → login → **My Account** → **API Key**
+2. Zet in de **sync**-container: `ENTSOE_API_TOKEN=jouw-key` (Dockhand: environment bij service `sync`)
+3. Opnieuw synchroniseren — statusmelding toont `(markt via entsoe)` als fallback actief was.
+
+**Nordpool-statistieken in HA** geven alleen historie **vanaf het moment dat statistieken aan staan**; voor maanden terug heb je markt-API (Energy-Charts of ENTSO-E) nodig. Oude Nordpool-**states** in HA zijn meestal beperkt tot de recorder-retentie (vaak ~10 dagen), niet maanden.
 
 ## Home Assistant
 
@@ -73,6 +87,8 @@ Environment:
 | Variabele | Default |
 |-----------|---------|
 | `POCKETBASE_URL` | `http://app:8090` |
+| `ENTSOE_API_TOKEN` | leeg — fallback marktprijzen via ENTSO-E (aanbevolen bij 429) |
+| `MARKET_PRICE_SOURCE` | `auto` — `entsoe` of `energy-charts` |
 
 ## Productie (GHCR) en Dockhand
 

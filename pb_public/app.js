@@ -533,7 +533,7 @@ function renderSettings() {
       <label>Optioneel: Nordpool / HA-prijs (entity of statistic ID)
         <input name="price_statistic_id" value="${s.price_statistic_id || ""}" placeholder="sensor.nordpool_kwh" />
       </label>
-      <p class="muted small">Leeg laten = automatisch NL day-ahead via Energy-Charts (maanden historie, geen Nordpool nodig). Alleen invullen als je eigen HA-prijs wilt; dan moet de sensor in de <strong>statistieken</strong> staan (Ontwikkelhulpmiddelen → Statistieken) of de sync leest de state-historie.</p>
+      <p class="muted small">Leeg laten = NL day-ahead via Energy-Charts (maanden historie). Lukt ophalen niet (geblokkeerde API)? Zet <strong>ENTSOE_API_TOKEN</strong> op de sync-container — zie README. Nordpool-statistieken geven geen verleden vóór “statistieken aan”; voor maanden terug: markt-API, niet HA.</p>
 
       <input type="hidden" name="label" value="${s.label || "Standaard"}" />
       <button type="submit" class="btn primary">Opslaan</button>

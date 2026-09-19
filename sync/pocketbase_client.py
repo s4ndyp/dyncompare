@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import httpx
+
+PB_URL = os.environ.get("POCKETBASE_URL", "http://127.0.0.1:8090").rstrip("/")
+
+
+class PocketBaseClient:
+    def __init__(self, base_url: str | None = None) -> None:
+        self.base_url = (base_url or PB_URL).rstrip("/")
+
+    async def list_all(
+        self,
+        collection: str,
+        *,
+        filter_query: str | None = None,
+        sort: str | None = None,
+        per_page: int = 200,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        page = 1
+        total_pages = 1
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            while page <= total_pages:
+                params: dict[str, str] = {
+                    "page": str(page),
+                    "perPage": str(per_page),
+                }
+                if filter_query:
+                    params["filter"] = filter_query
+                if sort:
+                    params["sort"] = sort
+                res = await client.get(
+                    f"{self.base_url}/api/collections/{collection}/records",
+                    params=params,
+                )
+                res.raise_for_status()
+                data = res.json()
+                items.extend(data.get("items") or [])
+                total_pages = data.get("totalPages") or 1
+                page += 1
+        return items
+
+    async def get_settings(self) -> dict[str, Any]:
+        rows = await self.list_all("settings", sort="created")
+        if not rows:
+            raise RuntimeError("Geen settings record in PocketBase")
+        return rows[0]
+
+    async def update_settings(self, record_id: str, payload: dict[str, Any]) -> None:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.patch(
+                f"{self.base_url}/api/collections/settings/records/{record_id}",
+                json=payload,
+            )
+            res.raise_for_status()
+
+    async def upsert_by_period(
+        self,
+        collection: str,
+        period_start: str,
+        payload: dict[str, Any],
+    ) -> None:
+        filter_query = f'period_start="{period_start}"'
+        existing = await self.list_all(collection, filter_query=filter_query, per_page=1)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            if existing:
+                record_id = existing[0]["id"]
+                res = await client.patch(
+                    f"{self.base_url}/api/collections/{collection}/records/{record_id}",
+                    json=payload,
+                )
+            else:
+                body = {"period_start": period_start, **payload}
+                res = await client.post(
+                    f"{self.base_url}/api/collections/{collection}/records",
+                    json=body,
+                )
+            res.raise_for_status()
+
+    async def batch_upsert_price_slots(self, rows: list[dict[str, Any]]) -> int:
+        saved = 0
+        for row in rows:
+            await self.upsert_by_period("price_slots", row["period_start"], row)
+            saved += 1
+        return saved
+
+    async def batch_upsert_consumption(self, rows: list[dict[str, Any]]) -> int:
+        saved = 0
+        for row in rows:
+            period = row["period_start"]
+            payload = {
+                "import_t1_kwh": row["import_t1_kwh"],
+                "import_t2_kwh": row["import_t2_kwh"],
+                "export_t1_kwh": row["export_t1_kwh"],
+                "export_t2_kwh": row["export_t2_kwh"],
+            }
+            await self.upsert_by_period("consumption_hours", period, payload)
+            saved += 1
+        return saved

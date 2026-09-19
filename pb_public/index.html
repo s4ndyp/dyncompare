@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0d12" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="description" content="Vergelijk vast vs dynamisch stroomtarief op basis van je verbruik" />
+  <title>DynCompare</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-title-wrap">
+      <p class="eyebrow" id="periodLabel">Periode</p>
+      <h1 id="pageTitle">Vergelijk</h1>
+    </div>
+    <button class="icon-btn" id="refreshBtn" type="button" aria-label="Vernieuwen">↻</button>
+  </header>
+
+  <main id="app" class="app"></main>
+
+  <nav class="tabbar" aria-label="Hoofdmenu">
+    <button class="tab is-active" data-view="compare" type="button">
+      <span class="tab-icon">⚡</span>
+      <span>Vergelijk</span>
+    </button>
+    <button class="tab" data-view="data" type="button">
+      <span class="tab-icon">▦</span>
+      <span>Data</span>
+    </button>
+    <button class="tab" data-view="settings" type="button">
+      <span class="tab-icon">⚙</span>
+      <span>Instellingen</span>
+    </button>
+  </nav>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -8,6 +8,20 @@ import httpx
 PB_URL = os.environ.get("POCKETBASE_URL", "http://127.0.0.1:8090").rstrip("/")
 
 
+def _http_error_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text.strip() or response.reason_phrase
+    parts = [body.get("message") or ""]
+    data = body.get("data")
+    if isinstance(data, dict):
+        for key, val in data.items():
+            if isinstance(val, dict) and val.get("message"):
+                parts.append(f"{key}: {val['message']}")
+    return " — ".join(p for p in parts if p)
+
+
 class PocketBaseClient:
     def __init__(self, base_url: str | None = None) -> None:
         self.base_url = (base_url or PB_URL).rstrip("/")
@@ -37,7 +51,12 @@ class PocketBaseClient:
                     f"{self.base_url}/api/collections/{collection}/records",
                     params=params,
                 )
-                res.raise_for_status()
+                if not res.is_success:
+                    raise httpx.HTTPStatusError(
+                        _http_error_detail(res),
+                        request=res.request,
+                        response=res,
+                    )
                 data = res.json()
                 items.extend(data.get("items") or [])
                 total_pages = data.get("totalPages") or 1
@@ -56,7 +75,12 @@ class PocketBaseClient:
                 f"{self.base_url}/api/collections/settings/records/{record_id}",
                 json=payload,
             )
-            res.raise_for_status()
+            if not res.is_success:
+                raise httpx.HTTPStatusError(
+                    _http_error_detail(res),
+                    request=res.request,
+                    response=res,
+                )
 
     async def upsert_by_period(
         self,
@@ -79,7 +103,12 @@ class PocketBaseClient:
                     f"{self.base_url}/api/collections/{collection}/records",
                     json=body,
                 )
-            res.raise_for_status()
+            if not res.is_success:
+                raise httpx.HTTPStatusError(
+                    _http_error_detail(res),
+                    request=res.request,
+                    response=res,
+                )
 
     async def batch_upsert_price_slots(self, rows: list[dict[str, Any]]) -> int:
         saved = 0

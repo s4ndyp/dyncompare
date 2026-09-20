@@ -1476,14 +1476,18 @@ function renderData() {
       <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Beide €/kWh-kolommen zijn all-in (markt-opslag + BTW uit Instellingen). Zet BTW op 0 als je vaste €0,28 al inclusief BTW is.</p>
       ${hourly.truncated ? `<p class="muted small warn-text">Toont ${hourly.rows.length} van ${hourly.total} uren met verbruik (nieuwste eerst).</p>` : ""}
       <div class="table-wrap">
-        <table class="data-table">
+        <table class="data-table data-table-hours">
+          <colgroup>
+            <col class="col-label" />
+            <col span="4" class="col-num" />
+          </colgroup>
           <thead>
             <tr>
-              <th>Uur</th>
-              <th>Verbruik</th>
-              <th>Vast €/kWh</th>
-              <th>Dynamisch €/kWh</th>
-              <th>Verschil (€)</th>
+              <th scope="col">Uur</th>
+              <th scope="col" class="num">Verbruik</th>
+              <th scope="col" class="num">Vast €/kWh</th>
+              <th scope="col" class="num">Dynamisch €/kWh</th>
+              <th scope="col" class="num">Verschil (€)</th>
             </tr>
           </thead>
           <tbody>
@@ -1633,19 +1637,23 @@ function renderStatistics() {
   appEl.innerHTML = `
     <section class="card">
       <h2 class="card-title">Maandoverzicht</h2>
-      <p class="muted small">Totalen en gewogen gemiddelde netto per geïmporteerde kWh (import − export)${vatNote}. Dynamisch = day-ahead + opslag. Per kalendermaand (${AMS_TZ === "Europe/Amsterdam" ? "Nederland" : AMS_TZ}).</p>
+      <p class="muted small">Totalen en gewogen gemiddelde netto per geïmporteerde kWh (import − export)${vatNote}. Dynamisch = day-ahead + opslag. Per kalendermaand (Europe/Amsterdam).</p>
       <p class="muted small">Data: laatste <strong>${STATS_HISTORY_DAYS}</strong> dagen uit de database (max. sync-periode).</p>
       <div class="table-wrap">
         <table class="data-table stats-table">
+          <colgroup>
+            <col class="col-label" />
+            <col span="6" class="col-num" />
+          </colgroup>
           <thead>
             <tr>
-              <th>Maand</th>
-              <th>Import dyn.</th>
-              <th>Export dyn.</th>
-              <th>Import vast</th>
-              <th>Export vast</th>
-              <th>Gem. dyn.</th>
-              <th>Gem. vast</th>
+              <th scope="col">Maand</th>
+              <th scope="col" class="num">Import dyn.</th>
+              <th scope="col" class="num">Export dyn.</th>
+              <th scope="col" class="num">Import vast</th>
+              <th scope="col" class="num">Export vast</th>
+              <th scope="col" class="num">Gem. dyn.</th>
+              <th scope="col" class="num">Gem. vast</th>
             </tr>
           </thead>
           <tbody>

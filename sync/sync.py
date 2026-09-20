@@ -38,61 +38,73 @@ async def run_sync(
     days: int = 400,
     include_market_prices: bool = True,
     market_missing_only: bool | None = None,
+    sync_ha: bool = True,
 ) -> dict[str, Any]:
     settings = await pb.get_settings()
-    ha_url = (settings.get("ha_url") or "").strip()
-    ha_token = (settings.get("ha_token") or "").strip()
-
-    if not ha_url or not ha_token:
-        raise RuntimeError("Vul Home Assistant URL en token in via Instellingen")
-
-    await pb.update_settings(
-        settings["id"],
-        {"last_sync_message": "Bezig: verbruik ophalen uit Home Assistant…"},
-    )
-
-    sensors = {
-        "import_t1": settings.get("sensor_import_t1") or "sensor.p1_energy_consumption_tarif_1",
-        "import_t2": settings.get("sensor_import_t2") or "sensor.p1_energy_consumption_tarif_2",
-        "export_t1": settings.get("sensor_export_t1") or "sensor.p1_energy_production_tarif_1",
-        "export_t2": settings.get("sensor_export_t2") or "sensor.p1_energy_production_tarif_2",
-    }
-
     now = datetime.now(tz=AMSTERDAM)
     start = now - timedelta(days=max(1, min(days, 730)))
     end = now + timedelta(hours=1)
 
-    ha = HomeAssistantClient(ha_url, ha_token, verify_tls=True)
-    stats = ha.statistics_during_period(
-        list(sensors.values()),
-        _iso_ha(start),
-        _iso_ha(end),
-        period="hour",
-        types=["change"],
-        units={"energy": "kWh"},
-    )
-
-    import_t1 = HomeAssistantClient.changes_by_start(stats.get(sensors["import_t1"]))
-    import_t2 = HomeAssistantClient.changes_by_start(stats.get(sensors["import_t2"]))
-    export_t1 = HomeAssistantClient.changes_by_start(stats.get(sensors["export_t1"]))
-    export_t2 = HomeAssistantClient.changes_by_start(stats.get(sensors["export_t2"]))
-
-    consumption_rows = merge_hourly_consumption(import_t1, import_t2, export_t1, export_t2)
-    consumption_saved = await pb.batch_upsert_consumption(consumption_rows)
-
-    await pb.update_settings(
-        settings["id"],
-        {
-            "last_sync_message": (
-                f"Bezig: {consumption_saved} uren verbruik opgeslagen, prijzen ophalen…"
-            ),
-        },
-    )
-
+    consumption_saved = 0
     price_saved = 0
+    ha: HomeAssistantClient | None = None
+
+    if sync_ha:
+        ha_url = (settings.get("ha_url") or "").strip()
+        ha_token = (settings.get("ha_token") or "").strip()
+
+        if not ha_url or not ha_token:
+            raise RuntimeError("Vul Home Assistant URL en token in via Instellingen")
+
+        await pb.update_settings(
+            settings["id"],
+            {"last_sync_message": "Bezig: verbruik ophalen uit Home Assistant…"},
+        )
+
+        sensors = {
+            "import_t1": settings.get("sensor_import_t1") or "sensor.p1_energy_consumption_tarif_1",
+            "import_t2": settings.get("sensor_import_t2") or "sensor.p1_energy_consumption_tarif_2",
+            "export_t1": settings.get("sensor_export_t1") or "sensor.p1_energy_production_tarif_1",
+            "export_t2": settings.get("sensor_export_t2") or "sensor.p1_energy_production_tarif_2",
+        }
+
+        ha = HomeAssistantClient(ha_url, ha_token, verify_tls=True)
+        stats = ha.statistics_during_period(
+            list(sensors.values()),
+            _iso_ha(start),
+            _iso_ha(end),
+            period="hour",
+            types=["change"],
+            units={"energy": "kWh"},
+        )
+
+        import_t1 = HomeAssistantClient.changes_by_start(stats.get(sensors["import_t1"]))
+        import_t2 = HomeAssistantClient.changes_by_start(stats.get(sensors["import_t2"]))
+        export_t1 = HomeAssistantClient.changes_by_start(stats.get(sensors["export_t1"]))
+        export_t2 = HomeAssistantClient.changes_by_start(stats.get(sensors["export_t2"]))
+
+        consumption_rows = merge_hourly_consumption(import_t1, import_t2, export_t1, export_t2)
+        consumption_saved = await pb.batch_upsert_consumption(consumption_rows)
+
+        await pb.update_settings(
+            settings["id"],
+            {
+                "last_sync_message": (
+                    f"Bezig: {consumption_saved} uren verbruik opgeslagen, prijzen ophalen…"
+                ),
+            },
+        )
+    elif include_market_prices:
+        await pb.update_settings(
+            settings["id"],
+            {"last_sync_message": "Bezig: alleen marktprijzen ophalen (geen HA-verbruik)…"},
+        )
+    else:
+        raise RuntimeError("Kies minstens HA-sync of marktprijzen")
+
     price_stat = (settings.get("price_statistic_id") or "").strip()
     ha_price_rows: list[dict[str, Any]] = []
-    if price_stat:
+    if sync_ha and price_stat and ha is not None:
         for period in ("5minute", "hour"):
             price_stats = ha.statistics_during_period(
                 [price_stat],
@@ -216,7 +228,10 @@ async def run_sync(
                 + (" …" if len(market_errors) > 3 else "")
             )
 
-    message = f"{consumption_saved} uur verbruik, {price_saved} prijs-slots gesynchroniseerd"
+    if sync_ha:
+        message = f"{consumption_saved} uur verbruik, {price_saved} prijs-slots gesynchroniseerd"
+    else:
+        message = f"{price_saved} markt prijs-slots gesynchroniseerd (zonder HA-verbruik)"
     if market_source:
         message += f" (markt via {market_source})"
     if market_complete_skipped:

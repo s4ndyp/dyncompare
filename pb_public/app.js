@@ -131,6 +131,7 @@ const state = {
   syncing: false,
   syncPollId: null,
   syncStartedAt: null,
+  exportBusy: false,
 };
 
 const appEl = document.getElementById("app");
@@ -1163,6 +1164,153 @@ async function refreshStatisticsView() {
   }
 }
 
+function settingsForExport(settings) {
+  if (!settings) return null;
+  const {
+    id: _id,
+    collectionId: _c,
+    collectionName: _n,
+    created: _cr,
+    updated: _up,
+    expand: _ex,
+    ha_token,
+    ...rest
+  } = settings;
+  return {
+    ...rest,
+    ha_token: ha_token ? "[redacted]" : "",
+  };
+}
+
+function consumptionForExport(row) {
+  return {
+    period_start: row.period_start,
+    import_t1_kwh: row.import_t1_kwh ?? 0,
+    import_t2_kwh: row.import_t2_kwh ?? 0,
+    export_t1_kwh: row.export_t1_kwh ?? 0,
+    export_t2_kwh: row.export_t2_kwh ?? 0,
+  };
+}
+
+function priceSlotForExport(row) {
+  return {
+    period_start: row.period_start,
+    price_eur_kwh: row.price_eur_kwh,
+    source: row.source,
+    interval_minutes: row.interval_minutes ?? 60,
+  };
+}
+
+function priceIntervalSummary(priceRows) {
+  const byMinutes = {};
+  const bySource = {};
+  for (const row of priceRows) {
+    const mins = Number(row.interval_minutes) || 60;
+    byMinutes[String(mins)] = (byMinutes[String(mins)] || 0) + 1;
+    const src = row.source || "unknown";
+    bySource[src] = bySource[src] || { count: 0, interval_minutes: {} };
+    bySource[src].count += 1;
+    bySource[src].interval_minutes[String(mins)] =
+      (bySource[src].interval_minutes[String(mins)] || 0) + 1;
+  }
+  const hasSubHourly = Object.keys(byMinutes).some((m) => Number(m) > 0 && Number(m) < 60);
+  return { byMinutes, bySource, hasSubHourly };
+}
+
+function buildJsonExportPayload(consumption, prices, rangeLabel, fromDate, toDate) {
+  const priceMeta = priceIntervalSummary(prices);
+  return {
+    schema_version: 1,
+    app: "DynCompare",
+    exported_at: new Date().toISOString(),
+    range_label: rangeLabel,
+    period_from: pbFilterFrom(fromDate),
+    period_to_exclusive: toDate.toISOString(),
+    price_storage: {
+      description:
+        "Markt- en HA-prijzen staan als losse slots in price_slots met interval_minutes (vaak 15 of 60 voor day-ahead; 5 of 60 bij Nordpool/HA). Verbruik (consumption_hours) is per uur. In de app worden uurkosten berekend door slots binnen dat uur tijds-gewogen te combineren; er is geen aparte uurprijs-tabel.",
+      interval_minutes_counts: priceMeta.byMinutes,
+      by_source: priceMeta.bySource,
+      has_sub_hourly_slots: priceMeta.hasSubHourly,
+      export_includes: priceMeta.hasSubHourly
+        ? "Originele slot-interval (o.a. kwartier) zoals opgeslagen"
+        : "Alleen uur-slots (interval_minutes=60) in database",
+    },
+    settings: settingsForExport(state.settings),
+    consumption_hours: consumption.map(consumptionForExport),
+    price_slots: prices.map(priceSlotForExport),
+  };
+}
+
+function downloadJsonExport(filename, payload) {
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportFilenameSuffix() {
+  const d = amsterdamCalendarParts();
+  return `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+}
+
+async function fetchRecordsForExport(fromDate, toDate) {
+  const filter = `period_start >= "${pbFilterFrom(fromDate)}" && period_start < "${pbFilterFrom(toDate)}"`;
+  const [consumption, prices] = await Promise.all([
+    listAll("consumption_hours", { filter, sort: "period_start" }),
+    listAll("price_slots", { filter, sort: "period_start" }),
+  ]);
+  return { consumption, prices };
+}
+
+async function runJsonExport(scope) {
+  if (state.exportBusy) return;
+  state.exportBusy = true;
+  try {
+    await loadSettings();
+    const toDate = new Date();
+    let fromDate;
+    let rangeLabel;
+    if (scope === "full") {
+      fromDate = new Date(toDate);
+      fromDate.setUTCDate(fromDate.getUTCDate() - STATS_HISTORY_DAYS);
+      rangeLabel = `Laatste ${STATS_HISTORY_DAYS} dagen`;
+    } else {
+      fromDate = periodStartDate();
+      rangeLabel = PERIODS[state.period].label;
+    }
+    toast("Export laden…");
+    const { consumption, prices } = await fetchRecordsForExport(fromDate, toDate);
+    const payload = buildJsonExportPayload(consumption, prices, rangeLabel, fromDate, toDate);
+    const scopeTag = scope === "full" ? "730d" : state.period;
+    downloadJsonExport(`dyncompare-export-${exportFilenameSuffix()}-${scopeTag}.json`, payload);
+    toast(
+      `JSON export: ${consumption.length} uren, ${prices.length} prijs-slots` +
+        (payload.price_storage.has_sub_hourly_slots ? " (incl. kwartier/slot)" : ""),
+      5000
+    );
+  } catch (e) {
+    toast(e.message || "Export mislukt");
+  } finally {
+    state.exportBusy = false;
+  }
+}
+
+function bindJsonExportButtons(root = appEl) {
+  root.querySelectorAll("[data-json-export]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      runJsonExport(btn.dataset.jsonExport);
+    });
+  });
+}
+
 function syncServiceUrl() {
   const fromSettings = (state.settings?.sync_service_url || "").trim();
   if (fromSettings) return fromSettings.replace(/\/$/, "");
@@ -1510,6 +1658,19 @@ function renderData() {
         <dt>Sync status</dt><dd>${state.settings?.last_sync_message || "—"}</dd>
       </dl>
     </section>
+
+    <section class="card">
+      <h2 class="card-title">JSON-export</h2>
+      <p class="muted small">HA-verbruik (uurtotalen) + prijs-slots (markt/HA) zoals in PocketBase. Prijzen houden <strong>interval_minutes</strong> bij: kwartier (15) of uur (60) indien gesynced — geen aparte uurprijs-DB; anders exporteert dit uur-slots.</p>
+      <div class="export-actions">
+        <button type="button" class="btn primary" data-json-export="period" ${state.exportBusy ? "disabled" : ""}>
+          Download JSON (${PERIODS[state.period].label.toLowerCase()})
+        </button>
+        <button type="button" class="btn secondary" data-json-export="full" ${state.exportBusy ? "disabled" : ""}>
+          Download JSON (${STATS_HISTORY_DAYS} dagen)
+        </button>
+      </div>
+    </section>
   `;
 
   appEl.querySelectorAll("[data-period]").forEach((btn) => {
@@ -1518,6 +1679,7 @@ function renderData() {
       await refresh();
     });
   });
+  bindJsonExportButtons();
 }
 
 function renderCharts() {
@@ -1662,8 +1824,16 @@ function renderStatistics() {
         </table>
       </div>
       <p class="muted small">Gem. = (importkosten − exportopbrengst) ÷ import kWh die maand. Exportkolommen zijn opbrengst (niet de netto-aftrek).</p>
+      <h3 class="card-title" style="margin-top:16px">JSON-export</h3>
+      <p class="muted small">Zelfde ${STATS_HISTORY_DAYS}-dagen set als deze tabel: verbruik + prijs-slots (kwartier indien aanwezig).</p>
+      <div class="export-actions">
+        <button type="button" class="btn primary" data-json-export="full" ${state.exportBusy ? "disabled" : ""}>
+          Download JSON (${STATS_HISTORY_DAYS} dagen)
+        </button>
+      </div>
     </section>
   `;
+  bindJsonExportButtons();
 }
 
 function renderSettings() {

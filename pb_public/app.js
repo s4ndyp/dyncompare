@@ -5,12 +5,28 @@ const PERIODS = {
   year: { label: "Afgelopen jaar", days: 366, syncDays: 366 },
 };
 
+function amsterdamYearMonth(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Amsterdam",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date);
+  const year = Number(parts.find((p) => p.type === "year").value);
+  const month = Number(parts.find((p) => p.type === "month").value);
+  return { year, month };
+}
+
 const state = {
   view: "compare",
   period: "month",
   settings: null,
   consumption: [],
   prices: [],
+  chartMonth: amsterdamYearMonth(),
+  chartConsumption: [],
+  chartPrices: [],
+  priceChart: null,
+  diffChart: null,
   loading: false,
   syncing: false,
   syncPollId: null,
@@ -220,6 +236,259 @@ async function loadData() {
     filter,
     sort: "period_start",
   });
+}
+
+async function loadMonthData(year, month) {
+  const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
+  const end = new Date(Date.UTC(year, month, 1, 0, 0, 0));
+  const filter = `period_start >= "${pbFilterFrom(start)}" && period_start < "${pbFilterFrom(end)}"`;
+  state.chartConsumption = await listAll("consumption_hours", {
+    filter,
+    sort: "period_start",
+  });
+  state.chartPrices = await listAll("price_slots", {
+    filter,
+    sort: "period_start",
+  });
+}
+
+function monthLabel(year, month) {
+  return new Intl.DateTimeFormat("nl-NL", {
+    timeZone: "Europe/Amsterdam",
+    month: "long",
+    year: "numeric",
+  }).format(new Date(Date.UTC(year, month - 1, 15)));
+}
+
+function isInAmsterdamMonth(date, year, month) {
+  const key = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Amsterdam",
+    year: "numeric",
+    month: "2-digit",
+  }).format(date);
+  return key === `${year}-${String(month).padStart(2, "0")}`;
+}
+
+function buildMarketOnlyIndex(priceRows) {
+  const market = priceRows.filter((p) => p.source === "market");
+  return buildPriceIndex(market.length ? market : priceRows);
+}
+
+function hourlyMarketRateEurKwh(hourStartMs, priceSlots) {
+  return priceForHour(hourStartMs, 1, priceSlots);
+}
+
+function collectChartHourStarts(consumption, prices, year, month) {
+  const keys = new Set();
+  const addRow = (row) => {
+    const start = parsePbDate(row.period_start);
+    if (!start || !isInAmsterdamMonth(start, year, month)) return;
+    const hour = new Date(start);
+    hour.setUTCMinutes(0, 0, 0);
+    keys.add(hour.getTime());
+  };
+  consumption.forEach(addRow);
+  prices.forEach(addRow);
+  return [...keys].sort((a, b) => a - b);
+}
+
+function buildMonthChartPoints(year, month) {
+  const ctx = calcContext();
+  const fixedAllIn = ctx.applyVat(ctx.fixed);
+  const slots = buildMarketOnlyIndex(state.chartPrices || []);
+  const hours = collectChartHourStarts(
+    state.chartConsumption || [],
+    state.chartPrices || [],
+    year,
+    month
+  );
+  return hours
+    .map((ms) => {
+      const raw = hourlyMarketRateEurKwh(ms, slots);
+      if (raw == null) return null;
+      const market = ctx.applyVat(raw + ctx.markup);
+      return {
+        ms,
+        label: formatHourLabel(new Date(ms)),
+        market,
+        fixed: fixedAllIn,
+        diff: fixedAllIn - market,
+      };
+    })
+    .filter(Boolean);
+}
+
+function destroyCharts() {
+  if (state.priceChart) {
+    state.priceChart.destroy();
+    state.priceChart = null;
+  }
+  if (state.diffChart) {
+    state.diffChart.destroy();
+    state.diffChart = null;
+  }
+}
+
+const chartFixedShadePlugin = {
+  id: "fixedPriceShade",
+  beforeDatasetsDraw(chart, _args, opts) {
+    const fixed = opts?.fixedPrice;
+    if (!Number.isFinite(fixed)) return;
+    const { ctx, chartArea, scales } = chart;
+    const yFixed = scales.y.getPixelForValue(fixed);
+    const top = chartArea.top;
+    const bottom = chartArea.bottom;
+    ctx.save();
+    ctx.fillStyle = "rgba(251, 146, 60, 0.22)";
+    ctx.fillRect(chartArea.left, top, chartArea.width, Math.max(0, yFixed - top));
+    ctx.fillStyle = "rgba(74, 222, 128, 0.22)";
+    ctx.fillRect(chartArea.left, yFixed, chartArea.width, Math.max(0, bottom - yFixed));
+    ctx.restore();
+  },
+};
+
+function mountCharts() {
+  if (typeof Chart === "undefined") {
+    toast("Grafiek-library niet geladen");
+    return;
+  }
+  const points = buildMonthChartPoints(state.chartMonth.year, state.chartMonth.month);
+  const priceCanvas = document.getElementById("priceChartCanvas");
+  const diffCanvas = document.getElementById("diffChartCanvas");
+  if (!priceCanvas || !diffCanvas) return;
+
+  if (!points.length) {
+    return;
+  }
+
+  const labels = points.map((p) => p.label);
+  const marketData = points.map((p) => p.market);
+  const fixedData = points.map((p) => p.fixed);
+  const diffData = points.map((p) => p.diff);
+
+  const commonX = {
+    ticks: { color: "#9aa3b8", maxTicksLimit: 8, font: { size: 10 } },
+    grid: { color: "rgba(42,49,66,0.6)" },
+  };
+  const commonY = {
+    ticks: { color: "#9aa3b8", font: { size: 10 } },
+    grid: { color: "rgba(42,49,66,0.6)" },
+  };
+
+  state.priceChart = new Chart(priceCanvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Markt day-ahead",
+          data: marketData,
+          borderColor: "#7c9cff",
+          backgroundColor: "rgba(124,156,255,0.08)",
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.15,
+        },
+        {
+          label: "Vast (all-in)",
+          data: fixedData,
+          borderColor: "#f4f6fb",
+          borderWidth: 1.5,
+          borderDash: [6, 4],
+          pointRadius: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        fixedPriceShade: { fixedPrice: fixedData[0] },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              return `${ctx.dataset.label}: ${euro(ctx.parsed.y, 4)}/kWh`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: commonX,
+        y: {
+          ...commonY,
+          title: { display: true, text: "€/kWh", color: "#9aa3b8", font: { size: 11 } },
+        },
+      },
+    },
+    plugins: [chartFixedShadePlugin],
+  });
+
+  state.diffChart = new Chart(diffCanvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Verschil vast − markt",
+          data: diffData,
+          backgroundColor: diffData.map((d) =>
+            d >= 0 ? "rgba(74, 222, 128, 0.75)" : "rgba(251, 146, 60, 0.75)"
+          ),
+          borderWidth: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              const v = ctx.parsed.y;
+              return `${v >= 0 ? "+" : ""}${euro(v, 4)}/kWh (positief = markt goedkoper)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: commonX,
+        y: {
+          ...commonY,
+          title: { display: true, text: "€/kWh verschil", color: "#9aa3b8", font: { size: 11 } },
+        },
+      },
+    },
+  });
+}
+
+function shiftChartMonth(delta) {
+  let { year, month } = state.chartMonth;
+  month += delta;
+  if (month > 12) {
+    month = 1;
+    year += 1;
+  } else if (month < 1) {
+    month = 12;
+    year -= 1;
+  }
+  state.chartMonth = { year, month };
+}
+
+async function refreshChartView() {
+  state.loading = true;
+  try {
+    await loadSettings();
+    await loadMonthData(state.chartMonth.year, state.chartMonth.month);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    state.loading = false;
+    render();
+  }
 }
 
 function importKwh(row) {
@@ -668,6 +937,60 @@ function renderData() {
   });
 }
 
+function renderCharts() {
+  destroyCharts();
+  const { year, month } = state.chartMonth;
+  const points = buildMonthChartPoints(year, month);
+  const monthTitle = monthLabel(year, month);
+
+  appEl.innerHTML = `
+    <section class="card">
+      <div class="chart-nav">
+        <button type="button" class="btn secondary" id="chartPrevMonth" aria-label="Vorige maand">← Vorige</button>
+        <h2>${monthTitle}</h2>
+        <button type="button" class="btn secondary" id="chartNextMonth" aria-label="Volgende maand">Volgende →</button>
+      </div>
+      <p class="muted small">Per uur: markt day-ahead (all-in) vs vaste prijs. <span class="legend-orange">Oranje</span> = markt duurder dan vast; <span class="legend-green">groen</span> = markt goedkoper.</p>
+      ${
+        points.length
+          ? `
+      <div class="chart-canvas-wrap">
+        <canvas id="priceChartCanvas" aria-label="Marktprijs en vaste prijs per uur"></canvas>
+      </div>
+      <div class="chart-legend">
+        <span class="legend-market">Markt day-ahead</span>
+        <span class="legend-fixed">Vast (all-in)</span>
+        <span class="legend-orange">Boven vast (duurder)</span>
+        <span class="legend-green">Onder vast (goedkoper)</span>
+      </div>
+      <h3 class="card-title" style="margin-top:16px">Verschil (vast − markt)</h3>
+      <p class="muted small">Positief = dynamisch goedkoper; negatief = dynamisch duurder.</p>
+      <div class="chart-canvas-wrap tall">
+        <canvas id="diffChartCanvas" aria-label="Verschil vast minus markt per uur"></canvas>
+      </div>
+      `
+          : `<p class="muted">Geen marktprijsdata voor ${monthTitle}. Synchroniseer marktprijzen of kies een andere maand.</p>`
+      }
+    </section>
+  `;
+
+  document.getElementById("chartPrevMonth")?.addEventListener("click", () => {
+    shiftChartMonth(-1);
+    refreshChartView();
+  });
+  document.getElementById("chartNextMonth")?.addEventListener("click", () => {
+    shiftChartMonth(1);
+    refreshChartView();
+  });
+
+  if (points.length) {
+    requestAnimationFrame(() => {
+      destroyCharts();
+      mountCharts();
+    });
+  }
+}
+
 function renderSettings() {
   const s = state.settings || {};
   appEl.innerHTML = `
@@ -731,12 +1054,18 @@ function renderSettings() {
 }
 
 function render() {
-  periodLabel.textContent = PERIODS[state.period].label;
-  const titles = { compare: "Vergelijk", data: "Data", settings: "Instellingen" };
+  const titles = { compare: "Vergelijk", data: "Data", charts: "Grafiek", settings: "Instellingen" };
   pageTitle.textContent = titles[state.view] || "DynCompare";
+
+  if (state.view === "charts") {
+    periodLabel.textContent = monthLabel(state.chartMonth.year, state.chartMonth.month);
+  } else {
+    periodLabel.textContent = PERIODS[state.period].label;
+  }
 
   if (state.view === "compare") renderCompare();
   else if (state.view === "data") renderData();
+  else if (state.view === "charts") renderCharts();
   else renderSettings();
 }
 
@@ -755,15 +1084,20 @@ async function refresh() {
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
+    const prev = state.view;
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
     tab.classList.add("is-active");
     state.view = tab.dataset.view;
-    render();
+    if (prev === "charts" && state.view !== "charts") destroyCharts();
+    if (state.view === "charts") refreshChartView();
+    else render();
   });
 });
 
 refreshBtn?.addEventListener("click", () => {
-  if (!state.syncing) refresh();
+  if (state.syncing) return;
+  if (state.view === "charts") refreshChartView();
+  else refresh();
 });
 
 async function resumeSyncBannerIfBusy() {

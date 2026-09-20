@@ -49,7 +49,7 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0;
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  display: grid; grid-template-columns: repeat(4, 1fr);
   gap: 4px;
   padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
   background: color-mix(in srgb, var(--bg) 90%, transparent);
@@ -57,7 +57,7 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 }
 .tab {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 8px; border-radius: 14px; color: var(--muted); font-size: 12px;
+  padding: 8px 4px; border-radius: 14px; color: var(--muted); font-size: 11px;
 }
 .tab.is-active { background: var(--card); color: var(--text); }
 .tab-icon { font-size: 18px; }
@@ -101,6 +101,57 @@ h1 { margin: 2px 0 0; font-size: 26px; }
   margin-bottom: 8px;
 }
 .checkbox-row input { margin-top: 3px; }
+
+.chart-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.chart-nav h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  text-transform: capitalize;
+  flex: 1;
+  text-align: center;
+}
+.chart-nav .btn.secondary {
+  padding: 8px 12px;
+  font-size: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #12151d;
+  color: var(--text);
+}
+.chart-canvas-wrap {
+  position: relative;
+  height: 220px;
+  margin-top: 8px;
+}
+.chart-canvas-wrap.tall { height: 180px; }
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.chart-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.legend-orange::before { background: rgba(251, 146, 60, 0.85); }
+.legend-green::before { background: rgba(74, 222, 128, 0.85); }
+.legend-market::before { background: #7c9cff; }
+.legend-fixed::before { background: #f4f6fb; }
 
 .hero { text-align: center; }
 .hero-value { font-size: 36px; font-weight: 700; margin: 8px 0; letter-spacing: -0.03em; }

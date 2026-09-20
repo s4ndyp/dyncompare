@@ -132,7 +132,27 @@ const state = {
   syncPollId: null,
   syncStartedAt: null,
   exportBusy: false,
+  importBusy: false,
 };
+
+const PRICE_SLOT_SOURCES = new Set(["market", "home_assistant", "manual"]);
+
+const SETTINGS_IMPORT_FIELDS = [
+  "label",
+  "fixed_tariff_eur_kwh",
+  "export_tariff_eur_kwh",
+  "market_markup_eur_kwh",
+  "vat_rate",
+  "sensor_import_t1",
+  "sensor_import_t2",
+  "sensor_export_t1",
+  "sensor_export_t2",
+  "price_statistic_id",
+  "market_sync_missing_only",
+  "include_export_in_avg",
+  "sync_include_ha",
+  "ha_url",
+];
 
 const appEl = document.getElementById("app");
 const pageTitle = document.getElementById("pageTitle");
@@ -1311,6 +1331,202 @@ function bindJsonExportButtons(root = appEl) {
   });
 }
 
+function jsonTransferBusy() {
+  return state.exportBusy || state.importBusy;
+}
+
+function pbPeriodFilterValue(periodStart) {
+  return String(periodStart).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function findRecordByPeriod(collection, periodStart) {
+  const filter = `period_start="${pbPeriodFilterValue(periodStart)}"`;
+  const q = new URLSearchParams({ filter, perPage: "1" });
+  const data = await pbRequest(`/api/collections/${collection}/records?${q}`);
+  return (data.items && data.items[0]) || null;
+}
+
+async function upsertByPeriod(collection, periodStart, payload) {
+  const existing = await findRecordByPeriod(collection, periodStart);
+  if (existing?.id) {
+    await pbRequest(`/api/collections/${collection}/records/${existing.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    return "updated";
+  }
+  await pbRequest(`/api/collections/${collection}/records`, {
+    method: "POST",
+    body: JSON.stringify({ period_start: periodStart, ...payload }),
+  });
+  return "created";
+}
+
+function parseImportPayload(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("Geen geldige JSON");
+  }
+  if (!data || data.schema_version !== 1) {
+    throw new Error("Onbekend exportbestand (schema_version 1 vereist)");
+  }
+  if (!Array.isArray(data.consumption_hours) || !Array.isArray(data.price_slots)) {
+    throw new Error("consumption_hours en price_slots moeten arrays zijn");
+  }
+  return data;
+}
+
+function normalizeConsumptionImportRow(row) {
+  const period = row?.period_start;
+  if (!period) throw new Error("Verbruiksregel zonder period_start");
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  };
+  return {
+    period_start: period,
+    payload: {
+      import_t1_kwh: num(row.import_t1_kwh),
+      import_t2_kwh: num(row.import_t2_kwh),
+      export_t1_kwh: num(row.export_t1_kwh),
+      export_t2_kwh: num(row.export_t2_kwh),
+    },
+  };
+}
+
+function normalizePriceImportRow(row) {
+  const period = row?.period_start;
+  if (!period) throw new Error("Prijsregel zonder period_start");
+  const price = Number(row.price_eur_kwh);
+  if (!Number.isFinite(price)) throw new Error(`Ongeldige prijs voor ${period}`);
+  const source = PRICE_SLOT_SOURCES.has(row.source) ? row.source : "market";
+  const interval = Number(row.interval_minutes);
+  const interval_minutes = Number.isFinite(interval) && interval >= 1 ? interval : 60;
+  return {
+    period_start: period,
+    payload: {
+      price_eur_kwh: price,
+      source,
+      interval_minutes,
+    },
+  };
+}
+
+async function applyImportedSettings(exportedSettings) {
+  if (!exportedSettings || !state.settings?.id) return 0;
+  const patch = {};
+  for (const key of SETTINGS_IMPORT_FIELDS) {
+    if (exportedSettings[key] === undefined || exportedSettings[key] === null) continue;
+    if (key === "ha_token") continue;
+    patch[key] = exportedSettings[key];
+  }
+  if (!Object.keys(patch).length) return 0;
+  await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+  return Object.keys(patch).length;
+}
+
+async function refreshAfterDataImport() {
+  if (state.view === "charts") await refreshChartView();
+  else if (state.view === "statistics") await refreshStatisticsView();
+  else await refresh();
+}
+
+async function runJsonImport(file, mergeSettings) {
+  if (jsonTransferBusy() || state.syncing) return;
+  if (!file) return;
+
+  state.importBusy = true;
+  setSyncControlsDisabled(true);
+
+  try {
+    const text = await file.text();
+    const data = parseImportPayload(text);
+    await loadSettings();
+
+    const consumptionRows = data.consumption_hours.map(normalizeConsumptionImportRow);
+    const priceRows = data.price_slots.map(normalizePriceImportRow);
+    const totalSteps = consumptionRows.length + priceRows.length;
+    let step = 0;
+
+    setSyncBanner("busy", "JSON importeren", `0 / ${totalSteps} records…`);
+
+    for (const row of consumptionRows) {
+      await upsertByPeriod("consumption_hours", row.period_start, row.payload);
+      step += 1;
+      if (step % 40 === 0 || step === totalSteps) {
+        setSyncBanner("busy", "JSON importeren", `${step} / ${totalSteps} records…`);
+      }
+    }
+
+    for (const row of priceRows) {
+      await upsertByPeriod("price_slots", row.period_start, row.payload);
+      step += 1;
+      if (step % 40 === 0 || step === totalSteps) {
+        setSyncBanner("busy", "JSON importeren", `${step} / ${totalSteps} records…`);
+      }
+    }
+
+    let settingsFields = 0;
+    if (mergeSettings) {
+      settingsFields = await applyImportedSettings(data.settings);
+      await loadSettings();
+    }
+
+    const importedAt = new Date().toISOString();
+    const msg = `Import JSON: ${consumptionRows.length} uren, ${priceRows.length} prijs-slots` +
+      (data.exported_at ? ` (export ${data.exported_at})` : "");
+    if (state.settings?.id) {
+      await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          last_sync_at: importedAt,
+          last_sync_message: msg,
+        }),
+      });
+    }
+
+    setSyncBanner(
+      "ok",
+      "Import voltooid",
+      `${msg}${settingsFields ? ` · ${settingsFields} instellingen` : ""}`
+    );
+    toast(msg, 7000);
+    setTimeout(() => {
+      if (!state.importBusy) setSyncBanner("hidden");
+    }, 10000);
+
+    await refreshAfterDataImport();
+  } catch (e) {
+    setSyncBanner("error", "Import mislukt", e.message || "Onbekende fout");
+    toast(e.message || "Import mislukt", 8000);
+  } finally {
+    state.importBusy = false;
+    setSyncControlsDisabled(false);
+  }
+}
+
+function bindJsonImportControls(root = appEl) {
+  const input = root.querySelector("#jsonImportInput");
+  if (!input) return;
+  input.addEventListener("change", () => {
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    const mergeSettings = Boolean(root.querySelector("#jsonImportMergeSettings")?.checked);
+    runJsonImport(file, mergeSettings);
+  });
+}
+
+function bindJsonTransferControls(root = appEl) {
+  bindJsonExportButtons(root);
+  bindJsonImportControls(root);
+}
+
 function syncServiceUrl() {
   const fromSettings = (state.settings?.sync_service_url || "").trim();
   if (fromSettings) return fromSettings.replace(/\/$/, "");
@@ -1660,16 +1876,27 @@ function renderData() {
     </section>
 
     <section class="card">
-      <h2 class="card-title">JSON-export</h2>
-      <p class="muted small">HA-verbruik (uurtotalen) + prijs-slots (markt/HA) zoals in PocketBase. Prijzen houden <strong>interval_minutes</strong> bij: kwartier (15) of uur (60) indien gesynced — geen aparte uurprijs-DB; anders exporteert dit uur-slots.</p>
+      <h2 class="card-title">JSON export / import</h2>
+      <p class="muted small">Verplaats data naar een andere DynCompare-server zonder opnieuw HA/markt op te halen. Export bevat uur-verbruik + prijs-slots (<strong>interval_minutes</strong> behouden).</p>
       <div class="export-actions">
-        <button type="button" class="btn primary" data-json-export="period" ${state.exportBusy ? "disabled" : ""}>
+        <button type="button" class="btn primary" data-json-export="period" ${jsonTransferBusy() || state.syncing ? "disabled" : ""}>
           Download JSON (${PERIODS[state.period].label.toLowerCase()})
         </button>
-        <button type="button" class="btn secondary" data-json-export="full" ${state.exportBusy ? "disabled" : ""}>
+        <button type="button" class="btn secondary" data-json-export="full" ${jsonTransferBusy() || state.syncing ? "disabled" : ""}>
           Download JSON (${STATS_HISTORY_DAYS} dagen)
         </button>
       </div>
+      <label class="checkbox-row" style="margin-top:12px">
+        <input type="checkbox" id="jsonImportMergeSettings" checked />
+        Bij import ook tarieven &amp; sensoren uit bestand (geen HA-token)
+      </label>
+      <div class="export-actions">
+        <label class="btn secondary import-json-btn ${jsonTransferBusy() || state.syncing ? "is-disabled" : ""}">
+          JSON-bestand importeren
+          <input type="file" id="jsonImportInput" accept="application/json,.json" ${jsonTransferBusy() || state.syncing ? "disabled" : ""} hidden />
+        </label>
+      </div>
+      <p class="muted small">Import upsert per <code>period_start</code> (bestaande uren/prijzen worden overschreven).</p>
     </section>
   `;
 
@@ -1679,7 +1906,7 @@ function renderData() {
       await refresh();
     });
   });
-  bindJsonExportButtons();
+  bindJsonTransferControls();
 }
 
 function renderCharts() {
@@ -1833,7 +2060,7 @@ function renderStatistics() {
       </div>
     </section>
   `;
-  bindJsonExportButtons();
+  bindJsonTransferControls();
 }
 
 function renderSettings() {
@@ -1897,12 +2124,28 @@ function renderSettings() {
       <input type="hidden" name="label" value="${s.label || "Standaard"}" />
       <button type="submit" class="btn primary">Opslaan</button>
     </form>
+
+    <section class="card" style="margin-top:12px">
+      <h2 class="card-title">JSON import (andere server)</h2>
+      <p class="muted small">Importeer een exportbestand van een andere installatie. HA-token moet je hier handmatig invullen.</p>
+      <label class="checkbox-row">
+        <input type="checkbox" id="jsonImportMergeSettings" checked />
+        Tarieven &amp; sensoren uit bestand overnemen
+      </label>
+      <div class="export-actions">
+        <label class="btn secondary import-json-btn ${jsonTransferBusy() || state.syncing ? "is-disabled" : ""}">
+          JSON-bestand kiezen
+          <input type="file" id="jsonImportInput" accept="application/json,.json" ${jsonTransferBusy() || state.syncing ? "disabled" : ""} hidden />
+        </label>
+      </div>
+    </section>
   `;
 
   document.getElementById("settingsForm").addEventListener("submit", (e) => {
     e.preventDefault();
     saveSettings(e.target).catch((err) => toast(err.message));
   });
+  bindJsonTransferControls();
 }
 
 function render() {

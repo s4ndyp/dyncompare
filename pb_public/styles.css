@@ -259,6 +259,17 @@ h1 { margin: 2px 0 0; font-size: 26px; }
     min-width: 160px;
   }
 }
+.import-json-btn {
+  cursor: pointer;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.import-json-btn.is-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
 
 .notes { margin: 0 0 16px; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .notes strong { color: var(--text); font-weight: 600; }

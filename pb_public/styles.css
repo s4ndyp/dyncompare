@@ -90,6 +90,17 @@ h1 { margin: 2px 0 0; font-size: 26px; }
   background: rgba(124,156,255,.18);
   color: var(--text);
 }
+.segment-2 {
+  margin-bottom: 12px;
+}
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.checkbox-row input { margin-top: 3px; }
 
 .hero { text-align: center; }
 .hero-value { font-size: 36px; font-weight: 700; margin: 8px 0; letter-spacing: -0.03em; }

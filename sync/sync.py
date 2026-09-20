@@ -7,6 +7,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ha_client import HomeAssistantClient, merge_hourly_consumption
+from market_gap import (
+    day_ranges_to_fetch_chunks,
+    market_dates_with_coverage,
+    missing_day_ranges,
+)
 from market_prices import (
     EnergyChartsRateLimitedError,
     chunk_date_ranges,
@@ -32,6 +37,7 @@ async def run_sync(
     *,
     days: int = 400,
     include_market_prices: bool = True,
+    market_missing_only: bool | None = None,
 ) -> dict[str, Any]:
     settings = await pb.get_settings()
     ha_url = (settings.get("ha_url") or "").strip()
@@ -136,12 +142,25 @@ async def run_sync(
 
     market_source = ""
     market_errors: list[str] = []
+    market_missing_mode = (
+        market_missing_only
+        if market_missing_only is not None
+        else bool(settings.get("market_sync_missing_only"))
+    )
+    market_complete_skipped = False
     if include_market_prices:
         start_day = start.date()
         end_day = (now + timedelta(days=1)).date()
         entsoe_token = os.environ.get("ENTSOE_API_TOKEN", "").strip()
         market_rows: list[dict[str, Any]] = []
-        chunks = chunk_date_ranges(start_day, end_day, chunk_days=7)
+        if market_missing_mode:
+            covered = await market_dates_with_coverage(pb, start_day, end_day)
+            day_ranges = missing_day_ranges(start_day, end_day, covered)
+            chunks = day_ranges_to_fetch_chunks(day_ranges, chunk_days=7)
+            if not chunks:
+                market_complete_skipped = True
+        else:
+            chunks = chunk_date_ranges(start_day, end_day, chunk_days=7)
         skip_energy_charts = False
         chunk_pause_sec = 2.0
         for idx, (chunk_start, chunk_end) in enumerate(chunks, start=1):
@@ -190,7 +209,7 @@ async def run_sync(
 
         if market_rows:
             price_saved += await pb.batch_upsert_price_slots(market_rows)
-        elif market_errors:
+        elif market_errors and chunks:
             raise RuntimeError(
                 "Geen marktprijzen opgeslagen. "
                 + " | ".join(market_errors[:3])
@@ -200,6 +219,10 @@ async def run_sync(
     message = f"{consumption_saved} uur verbruik, {price_saved} prijs-slots gesynchroniseerd"
     if market_source:
         message += f" (markt via {market_source})"
+    if market_complete_skipped:
+        message += " — marktprijzen al compleet in sync-periode (incrementeel)"
+    elif market_missing_mode and chunks:
+        message += f" — markt: {len(chunks)} chunk(s) voor ontbrekende dagen"
     if market_errors and market_rows:
         message += f" — {len(market_errors)} markt-chunks mislukt (deels ingevuld)"
     await pb.update_settings(

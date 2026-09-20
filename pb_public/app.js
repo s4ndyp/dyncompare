@@ -176,6 +176,14 @@ function setSyncBanner(mode, title, detail) {
   if (syncBannerDetail) syncBannerDetail.textContent = detail || "";
 }
 
+function syncIncludeHa() {
+  return state.settings?.sync_include_ha !== false;
+}
+
+function syncPrimaryButtonLabel() {
+  return syncIncludeHa() ? "Synchroniseer met Home Assistant" : "Alleen marktprijzen ophalen";
+}
+
 function setSyncControlsDisabled(disabled) {
   if (refreshBtn) refreshBtn.disabled = disabled;
   document.querySelectorAll(".tab").forEach((tab) => {
@@ -184,7 +192,7 @@ function setSyncControlsDisabled(disabled) {
   const syncBtn = document.getElementById("syncBtn");
   if (syncBtn) {
     syncBtn.disabled = disabled;
-    syncBtn.textContent = disabled ? "Bezig met synchroniseren…" : "Synchroniseer met Home Assistant";
+    syncBtn.textContent = disabled ? "Bezig met synchroniseren…" : syncPrimaryButtonLabel();
   }
 }
 
@@ -1044,17 +1052,29 @@ async function persistIncludeExportInAvg(include) {
   state.settings.include_export_in_avg = include;
 }
 
+async function persistSyncIncludeHa(includeHa) {
+  if (!state.settings?.id) return;
+  await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ sync_include_ha: includeHa }),
+  });
+  state.settings.sync_include_ha = includeHa;
+}
+
 async function triggerSync() {
   if (state.syncing) return;
 
   const url = `${syncServiceUrl()}/sync`;
+  const withHa = syncIncludeHa();
   state.syncing = true;
   state.syncStartedAt = Date.now();
   setSyncControlsDisabled(true);
   setSyncBanner(
     "busy",
     "Synchroniseren",
-    "Verbruik en prijzen ophalen (kan enkele minuten duren)…"
+    withHa
+      ? "Verbruik en prijzen ophalen (kan enkele minuten duren)…"
+      : "Alleen marktprijzen ophalen (geen HA-verbruik)…"
   );
   startSyncPoll();
 
@@ -1066,6 +1086,7 @@ async function triggerSync() {
         days: syncDaysForPeriod(),
         include_market_prices: true,
         market_missing_only: isMarketMissingOnly(),
+        sync_ha: withHa,
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -1116,6 +1137,7 @@ async function saveSettings(form) {
     sensor_export_t2: form.sensor_export_t2.value.trim(),
     price_statistic_id: form.price_statistic_id.value.trim(),
     market_sync_missing_only: form.market_sync_missing_only.checked,
+    sync_include_ha: form.sync_include_ha.checked,
   };
   await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
     method: "PATCH",
@@ -1206,13 +1228,18 @@ function renderCompare() {
         ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch). Laat het veld Nordpool/HA-prijs leeg en synchroniseer opnieuw om NL day-ahead (Energy-Charts) te gebruiken — zie tab Data.</li>` : ""}
       </ul>
       <p class="muted small sync-meta">Laatste sync: ${formatSyncTimestamp(state.settings?.last_sync_at)} · ${state.settings?.last_sync_message || "—"}</p>
+      <p class="muted small">Sync-inhoud:</p>
+      <div class="segment segment-2" role="group" aria-label="Sync inhoud">
+        <button type="button" class="segment-btn ${syncIncludeHa() ? "is-active" : ""}" data-sync-scope="full" ${state.syncing ? "disabled" : ""}>HA + markt</button>
+        <button type="button" class="segment-btn ${!syncIncludeHa() ? "is-active" : ""}" data-sync-scope="market" ${state.syncing ? "disabled" : ""}>Alleen markt</button>
+      </div>
       <p class="muted small">Marktprijzen (Energy-Charts/ENTSO-E):</p>
       <div class="segment segment-2" role="group" aria-label="Marktprijzen synchronisatie">
         <button type="button" class="segment-btn ${isMarketMissingOnly() ? "is-active" : ""}" data-market-mode="missing" ${state.syncing ? "disabled" : ""}>Alleen ontbrekende dagen</button>
         <button type="button" class="segment-btn ${!isMarketMissingOnly() ? "is-active" : ""}" data-market-mode="full" ${state.syncing ? "disabled" : ""}>Hele periode opnieuw</button>
       </div>
-      <button type="button" class="btn primary" id="syncBtn" ${state.syncing ? "disabled" : ""}>${state.syncing ? "Bezig met synchroniseren…" : "Synchroniseer met Home Assistant"}</button>
-      <p class="muted small">Verbruik uit HA: altijd hele sync-periode (<strong>${syncDaysForPeriod()} dag(en)</strong>). Markt volgt de knop hierboven. Geen dubbele rijen in de database.</p>
+      <button type="button" class="btn primary" id="syncBtn" ${state.syncing ? "disabled" : ""}>${state.syncing ? "Bezig met synchroniseren…" : syncPrimaryButtonLabel()}</button>
+      <p class="muted small">${syncIncludeHa() ? `Verbruik uit HA: hele sync-periode (<strong>${syncDaysForPeriod()} dag(en)</strong>).` : "Geen HA-verbruik — sneller voor ontbrekende marktprijzen."} Markt volgt de knop hierboven (${syncDaysForPeriod()} dag(en)). Geen dubbele rijen in de database.</p>
     </section>
   `;
 
@@ -1229,6 +1256,20 @@ function renderCompare() {
       try {
         await persistMarketSyncMode(missingOnly);
         toast(missingOnly ? "Markt: alleen ontbrekende dagen" : "Markt: hele periode opnieuw");
+        render();
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  });
+  appEl.querySelectorAll("[data-sync-scope]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (state.syncing) return;
+      const includeHa = btn.dataset.syncScope === "full";
+      if (includeHa === syncIncludeHa()) return;
+      try {
+        await persistSyncIncludeHa(includeHa);
+        toast(includeHa ? "Sync: HA-verbruik + markt" : "Sync: alleen marktprijzen");
         render();
       } catch (e) {
         toast(e.message);
@@ -1453,6 +1494,10 @@ function renderSettings() {
       <label class="checkbox-row">
         <input type="checkbox" name="market_sync_missing_only" ${s.market_sync_missing_only ? "checked" : ""} />
         Marktprijzen: alleen ontbrekende dagen ophalen (minder API-calls)
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" name="sync_include_ha" ${s.sync_include_ha !== false ? "checked" : ""} />
+        Sync standaard incl. Home Assistant-verbruik (uit = alleen marktprijzen, sneller)
       </label>
 
       <h2 class="card-title">Home Assistant</h2>

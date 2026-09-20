@@ -5,15 +5,109 @@ const PERIODS = {
   year: { label: "Afgelopen jaar", days: 366, syncDays: 366 },
 };
 
+const AMS_TZ = "Europe/Amsterdam";
+
 function amsterdamYearMonth(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Amsterdam",
+    timeZone: AMS_TZ,
     year: "numeric",
     month: "2-digit",
   }).formatToParts(date);
   const year = Number(parts.find((p) => p.type === "year").value);
   const month = Number(parts.find((p) => p.type === "month").value);
   return { year, month };
+}
+
+function amsterdamCalendarParts(date = new Date()) {
+  const key = new Intl.DateTimeFormat("en-CA", {
+    timeZone: AMS_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+  const [year, month, day] = key.split("-").map(Number);
+  return { year, month, day };
+}
+
+function amsterdamLocalToDate(year, month, day, hour = 0, minute = 0, second = 0) {
+  let t = Date.UTC(year, month - 1, day, hour, minute, second);
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(t);
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: AMS_TZ,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      })
+        .formatToParts(d)
+        .map((p) => [p.type, p.value])
+    );
+    const target = Date.UTC(year, month - 1, day, hour, minute, second);
+    const actual = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second)
+    );
+    const diffMs = target - actual;
+    if (diffMs === 0) return d;
+    t += diffMs;
+  }
+  return new Date(t);
+}
+
+function amsterdamDaysFromMonday(date) {
+  const w = new Intl.DateTimeFormat("en-US", { timeZone: AMS_TZ, weekday: "short" }).format(date);
+  const map = { Sun: 6, Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5 };
+  return map[w] ?? 0;
+}
+
+function addAmsterdamCalendarDays({ year, month, day }, deltaDays) {
+  const anchor = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  anchor.setUTCDate(anchor.getUTCDate() + deltaDays);
+  return amsterdamCalendarParts(anchor);
+}
+
+function amsterdamWeekStart(date = new Date()) {
+  const today = amsterdamCalendarParts(date);
+  const anchor = amsterdamLocalToDate(today.year, today.month, today.day, 12, 0);
+  const fromMon = amsterdamDaysFromMonday(anchor);
+  return addAmsterdamCalendarDays(today, -fromMon);
+}
+
+function weekRangeLabel(weekStart) {
+  const end = addAmsterdamCalendarDays(weekStart, 6);
+  const fmt = new Intl.DateTimeFormat("nl-NL", {
+    timeZone: AMS_TZ,
+    day: "numeric",
+    month: "short",
+  });
+  const startD = amsterdamLocalToDate(weekStart.year, weekStart.month, weekStart.day, 12, 0);
+  const endD = amsterdamLocalToDate(end.year, end.month, end.day, 12, 0);
+  const year = new Intl.DateTimeFormat("nl-NL", { timeZone: AMS_TZ, year: "numeric" }).format(startD);
+  return `${fmt.format(startD)} – ${fmt.format(endD)} ${year}`;
+}
+
+function isInAmsterdamWeek(date, weekStart) {
+  const key = new Intl.DateTimeFormat("en-CA", {
+    timeZone: AMS_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+  for (let i = 0; i < 7; i++) {
+    const d = addAmsterdamCalendarDays(weekStart, i);
+    const dk = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+    if (key === dk) return true;
+  }
+  return false;
 }
 
 const state = {
@@ -23,6 +117,8 @@ const state = {
   consumption: [],
   prices: [],
   chartMonth: amsterdamYearMonth(),
+  chartGranularity: "month",
+  chartWeekStart: amsterdamWeekStart(),
   chartConsumption: [],
   chartPrices: [],
   priceChart: null,
@@ -253,6 +349,36 @@ async function loadMonthData(year, month) {
   });
 }
 
+async function loadWeekData(weekStart) {
+  const weekEndStart = addAmsterdamCalendarDays(weekStart, 7);
+  const start = amsterdamLocalToDate(weekStart.year, weekStart.month, weekStart.day, 0, 0);
+  const end = amsterdamLocalToDate(weekEndStart.year, weekEndStart.month, weekEndStart.day, 0, 0);
+  const filter = `period_start >= "${pbFilterFrom(start)}" && period_start < "${pbFilterFrom(end)}"`;
+  state.chartConsumption = await listAll("consumption_hours", {
+    filter,
+    sort: "period_start",
+  });
+  state.chartPrices = await listAll("price_slots", {
+    filter,
+    sort: "period_start",
+  });
+}
+
+async function loadChartRangeData() {
+  if (state.chartGranularity === "week") {
+    await loadWeekData(state.chartWeekStart);
+  } else {
+    await loadMonthData(state.chartMonth.year, state.chartMonth.month);
+  }
+}
+
+function chartRangeTitle() {
+  if (state.chartGranularity === "week") {
+    return weekRangeLabel(state.chartWeekStart);
+  }
+  return monthLabel(state.chartMonth.year, state.chartMonth.month);
+}
+
 function monthLabel(year, month) {
   return new Intl.DateTimeFormat("nl-NL", {
     timeZone: "Europe/Amsterdam",
@@ -293,8 +419,53 @@ function collectChartHourStarts(consumption, prices, year, month) {
   return [...keys].sort((a, b) => a - b);
 }
 
+function calcChartContext() {
+  const settings = state.settings || {};
+  const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
+  const markup = Number(settings.market_markup_eur_kwh ?? 0);
+  const vat = Number(settings.vat_rate ?? 0);
+  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
+  return {
+    fixed,
+    markup,
+    vat,
+    applyVat,
+    priceSlots: buildPriceIndex(state.chartPrices || []),
+  };
+}
+
+function buildWeekCostPoints(weekStart) {
+  const ctx = calcChartContext();
+  const { fixed, markup, applyVat, priceSlots } = ctx;
+  const points = [];
+
+  for (const row of state.chartConsumption || []) {
+    const start = parsePbDate(row.period_start);
+    if (!start || !isInAmsterdamWeek(start, weekStart)) continue;
+    const kwh = importKwh(row);
+    if (kwh <= 0) continue;
+    const ms = start.getTime();
+    const energyCost = priceForHour(ms, kwh, priceSlots);
+    if (energyCost == null) continue;
+
+    const fixedCost = applyVat(kwh * fixed);
+    const dynamicCost = applyVat(energyCost + kwh * markup);
+    points.push({
+      ms,
+      label: formatHourLabel(start),
+      kwh,
+      fixedCost,
+      dynamicCost,
+      diffEur: fixedCost - dynamicCost,
+    });
+  }
+
+  points.sort((a, b) => a.ms - b.ms);
+  return points;
+}
+
 function buildMonthChartPoints(year, month) {
-  const ctx = calcContext();
+  const ctx = calcChartContext();
   const fixedAllIn = ctx.applyVat(ctx.fixed);
   const slots = buildMarketOnlyIndex(state.chartPrices || []);
   const hours = collectChartHourStarts(
@@ -353,14 +524,18 @@ function mountCharts() {
     toast("Grafiek-library niet geladen");
     return;
   }
+  if (state.chartGranularity === "week") {
+    mountWeekCharts();
+    return;
+  }
+  mountMonthCharts();
+}
+
+function mountMonthCharts() {
   const points = buildMonthChartPoints(state.chartMonth.year, state.chartMonth.month);
   const priceCanvas = document.getElementById("priceChartCanvas");
   const diffCanvas = document.getElementById("diffChartCanvas");
-  if (!priceCanvas || !diffCanvas) return;
-
-  if (!points.length) {
-    return;
-  }
+  if (!priceCanvas || !diffCanvas || !points.length) return;
 
   const labels = points.map((p) => p.label);
   const marketData = points.map((p) => p.market);
@@ -466,6 +641,116 @@ function mountCharts() {
   });
 }
 
+function mountWeekCharts() {
+  const points = buildWeekCostPoints(state.chartWeekStart);
+  const priceCanvas = document.getElementById("priceChartCanvas");
+  const diffCanvas = document.getElementById("diffChartCanvas");
+  if (!priceCanvas || !diffCanvas || !points.length) return;
+
+  const labels = points.map((p) => p.label);
+  const fixedCosts = points.map((p) => p.fixedCost);
+  const dynamicCosts = points.map((p) => p.dynamicCost);
+  const diffEur = points.map((p) => p.diffEur);
+
+  const commonX = {
+    ticks: { color: "#9aa3b8", maxTicksLimit: 14, font: { size: 9 }, autoSkip: true },
+    grid: { color: "rgba(42,49,66,0.6)" },
+  };
+  const commonY = {
+    ticks: { color: "#9aa3b8", font: { size: 10 } },
+    grid: { color: "rgba(42,49,66,0.6)" },
+  };
+
+  state.priceChart = new Chart(priceCanvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Kosten vast",
+          data: fixedCosts,
+          backgroundColor: "rgba(244, 246, 251, 0.55)",
+          borderColor: "rgba(244, 246, 251, 0.9)",
+          borderWidth: 1,
+        },
+        {
+          label: "Kosten dynamisch",
+          data: dynamicCosts,
+          backgroundColor: "rgba(124, 156, 255, 0.75)",
+          borderColor: "#7c9cff",
+          borderWidth: 1,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              return `${ctx.dataset.label}: ${euro(ctx.parsed.y, 3)}`;
+            },
+            afterBody(items) {
+              const i = items[0]?.dataIndex;
+              if (i == null || !points[i]) return [];
+              return [`Verbruik: ${kwh(points[i].kwh, 2)}`];
+            },
+          },
+        },
+      },
+      scales: {
+        x: commonX,
+        y: {
+          ...commonY,
+          title: { display: true, text: "€ per uur", color: "#9aa3b8", font: { size: 11 } },
+        },
+      },
+    },
+  });
+
+  state.diffChart = new Chart(diffCanvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Verschil vast − dynamisch",
+          data: diffEur,
+          backgroundColor: diffEur.map((d) =>
+            d >= 0 ? "rgba(74, 222, 128, 0.75)" : "rgba(251, 146, 60, 0.75)"
+          ),
+          borderWidth: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              const v = ctx.parsed.y;
+              return `${v >= 0 ? "+" : ""}${euro(v, 3)} (positief = dynamisch goedkoper)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: commonX,
+        y: {
+          ...commonY,
+          title: { display: true, text: "€ verschil per uur", color: "#9aa3b8", font: { size: 11 } },
+        },
+      },
+    },
+  });
+}
+
 function shiftChartMonth(delta) {
   let { year, month } = state.chartMonth;
   month += delta;
@@ -479,11 +764,15 @@ function shiftChartMonth(delta) {
   state.chartMonth = { year, month };
 }
 
+function shiftChartWeek(deltaWeeks) {
+  state.chartWeekStart = addAmsterdamCalendarDays(state.chartWeekStart, deltaWeeks * 7);
+}
+
 async function refreshChartView() {
   state.loading = true;
   try {
     await loadSettings();
-    await loadMonthData(state.chartMonth.year, state.chartMonth.month);
+    await loadChartRangeData();
   } catch (e) {
     toast(e.message);
   } finally {
@@ -1047,21 +1336,18 @@ function renderData() {
 
 function renderCharts() {
   destroyCharts();
-  const { year, month } = state.chartMonth;
-  const points = buildMonthChartPoints(year, month);
-  const monthTitle = monthLabel(year, month);
+  const isWeek = state.chartGranularity === "week";
+  const rangeTitle = chartRangeTitle();
+  const points = isWeek
+    ? buildWeekCostPoints(state.chartWeekStart)
+    : buildMonthChartPoints(state.chartMonth.year, state.chartMonth.month);
+  const prevLabel = isWeek ? "← Vorige week" : "← Vorige";
+  const nextLabel = isWeek ? "Volgende week →" : "Volgende →";
+  const prevAria = isWeek ? "Vorige week" : "Vorige maand";
+  const nextAria = isWeek ? "Volgende week" : "Volgende maand";
 
-  appEl.innerHTML = `
-    <section class="card">
-      <div class="chart-nav">
-        <button type="button" class="btn secondary" id="chartPrevMonth" aria-label="Vorige maand">← Vorige</button>
-        <h2>${monthTitle}</h2>
-        <button type="button" class="btn secondary" id="chartNextMonth" aria-label="Volgende maand">Volgende →</button>
-      </div>
+  const monthBody = `
       <p class="muted small">Per uur: markt day-ahead (all-in) vs vaste prijs. <span class="legend-orange">Oranje</span> = markt duurder dan vast; <span class="legend-green">groen</span> = markt goedkoper.</p>
-      ${
-        points.length
-          ? `
       <div class="chart-canvas-wrap">
         <canvas id="priceChartCanvas" aria-label="Marktprijs en vaste prijs per uur"></canvas>
       </div>
@@ -1075,19 +1361,64 @@ function renderCharts() {
       <p class="muted small">Positief = dynamisch goedkoper; negatief = dynamisch duurder.</p>
       <div class="chart-canvas-wrap tall">
         <canvas id="diffChartCanvas" aria-label="Verschil vast minus markt per uur"></canvas>
+      </div>`;
+
+  const weekBody = `
+      <p class="muted small">Per uur met import: staafdiagram van kosten vast vs dynamisch (all-in). Alleen uren met verbruik én prijsdata.</p>
+      <div class="chart-canvas-wrap chart-canvas-wrap-week">
+        <canvas id="priceChartCanvas" aria-label="Kosten vast en dynamisch per uur"></canvas>
       </div>
-      `
-          : `<p class="muted">Geen marktprijsdata voor ${monthTitle}. Synchroniseer marktprijzen of kies een andere maand.</p>`
-      }
+      <div class="chart-legend">
+        <span class="legend-fixed">Kosten vast</span>
+        <span class="legend-market">Kosten dynamisch</span>
+      </div>
+      <h3 class="card-title" style="margin-top:16px">Verschil in € (vast − dynamisch)</h3>
+      <p class="muted small">Positief = dynamisch goedkoper dit uur; negatief = dynamisch duurder.</p>
+      <div class="chart-canvas-wrap tall chart-canvas-wrap-week">
+        <canvas id="diffChartCanvas" aria-label="Verschil in euro per uur"></canvas>
+      </div>`;
+
+  const emptyMsg = isWeek
+    ? `Geen uren met import én prijsdata voor ${rangeTitle}. Synchroniseer data of kies een andere week.`
+    : `Geen marktprijsdata voor ${rangeTitle}. Synchroniseer marktprijzen of kies een andere maand.`;
+
+  appEl.innerHTML = `
+    <section class="panel">
+      <div class="segment segment-2" role="group" aria-label="Grafiek periode">
+        <button type="button" class="segment-btn ${!isWeek ? "is-active" : ""}" data-chart-gran="month">Maand</button>
+        <button type="button" class="segment-btn ${isWeek ? "is-active" : ""}" data-chart-gran="week">Week</button>
+      </div>
+    </section>
+    <section class="card">
+      <div class="chart-nav">
+        <button type="button" class="btn secondary" id="chartPrevRange" aria-label="${prevAria}">${prevLabel}</button>
+        <h2>${rangeTitle}</h2>
+        <button type="button" class="btn secondary" id="chartNextRange" aria-label="${nextAria}">${nextLabel}</button>
+      </div>
+      ${points.length ? (isWeek ? weekBody : monthBody) : `<p class="muted">${emptyMsg}</p>`}
     </section>
   `;
 
-  document.getElementById("chartPrevMonth")?.addEventListener("click", () => {
-    shiftChartMonth(-1);
+  appEl.querySelectorAll("[data-chart-gran]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const gran = btn.dataset.chartGran;
+      if (gran === state.chartGranularity) return;
+      state.chartGranularity = gran;
+      if (gran === "week") {
+        state.chartWeekStart = amsterdamWeekStart();
+      }
+      refreshChartView();
+    });
+  });
+
+  document.getElementById("chartPrevRange")?.addEventListener("click", () => {
+    if (isWeek) shiftChartWeek(-1);
+    else shiftChartMonth(-1);
     refreshChartView();
   });
-  document.getElementById("chartNextMonth")?.addEventListener("click", () => {
-    shiftChartMonth(1);
+  document.getElementById("chartNextRange")?.addEventListener("click", () => {
+    if (isWeek) shiftChartWeek(1);
+    else shiftChartMonth(1);
     refreshChartView();
   });
 
@@ -1169,7 +1500,7 @@ function render() {
   pageTitle.textContent = titles[state.view] || "DynCompare";
 
   if (state.view === "charts") {
-    periodLabel.textContent = monthLabel(state.chartMonth.year, state.chartMonth.month);
+    periodLabel.textContent = chartRangeTitle();
   } else {
     periodLabel.textContent = PERIODS[state.period].label;
   }

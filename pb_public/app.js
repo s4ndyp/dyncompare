@@ -387,6 +387,8 @@ function computeSummary() {
 
   return {
     fixed,
+    fixedAllIn: applyVat(fixed),
+    vat: ctx.vat,
     markup,
     totalKwh,
     matchedKwh,
@@ -500,9 +502,9 @@ function renderCompare() {
     </section>
 
     <section class="hero card">
-      <p class="muted">Gewogen gemiddelde (dynamisch/simulatie)</p>
+      <p class="muted">Gewogen gemiddelde (dynamisch/simulatie)${summary.vat > 0 ? ", incl. BTW" : ""}</p>
       <p class="hero-value">${summary.avgDynamic != null ? euro(summary.avgDynamic, 4) : "—"}<span class="unit">/kWh</span></p>
-      <p class="muted small">Vast contract: ${euro(summary.fixed, 4)}/kWh (ingesteld)</p>
+      <p class="muted small">Vast contract: <strong>${euro(summary.fixedAllIn, 4)}/kWh</strong>${summary.vat > 0 ? " incl. BTW" : ""}${summary.vat > 0 ? ` · excl. ${euro(summary.fixed, 4)}/kWh (ingesteld)` : " (ingesteld)"}</p>
     </section>
 
     <section class="grid-2">

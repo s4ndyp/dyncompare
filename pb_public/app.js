@@ -1,7 +1,8 @@
 const PERIODS = {
-  month: { label: "Afgelopen maand", days: 31 },
-  halfyear: { label: "Afgelopen 6 maanden", days: 183 },
-  year: { label: "Afgelopen jaar", days: 366 },
+  day: { label: "Laatste 24 uur", days: 1, hours: 24, syncDays: 1 },
+  month: { label: "Afgelopen maand", days: 31, syncDays: 31 },
+  halfyear: { label: "Afgelopen 6 maanden", days: 183, syncDays: 183 },
+  year: { label: "Afgelopen jaar", days: 366, syncDays: 366 },
 };
 
 const state = {
@@ -158,12 +159,26 @@ async function listAll(collection, params = {}) {
 }
 
 function periodStartDate() {
-  const days = PERIODS[state.period].days;
+  const period = PERIODS[state.period];
   const end = new Date();
   const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - days);
+  if (period.hours) {
+    start.setTime(end.getTime() - period.hours * 3600_000);
+    return start;
+  }
+  start.setUTCDate(start.getUTCDate() - period.days);
   start.setUTCHours(0, 0, 0, 0);
   return start;
+}
+
+function syncDaysForPeriod() {
+  const period = PERIODS[state.period];
+  return Math.max(1, period.syncDays ?? period.days ?? 1);
+}
+
+function periodSegmentLabel(key, period) {
+  if (key === "day") return "24 uur";
+  return period.label.replace("Afgelopen ", "");
 }
 
 function pbFilterFrom(date) {
@@ -344,7 +359,7 @@ async function triggerSync() {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ days: PERIODS.year.days, include_market_prices: true }),
+      body: JSON.stringify({ days: syncDaysForPeriod(), include_market_prices: true }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -412,7 +427,7 @@ function renderCompare() {
         ${Object.entries(PERIODS)
           .map(
             ([key, p]) =>
-              `<button type="button" class="segment-btn ${state.period === key ? "is-active" : ""}" data-period="${key}">${p.label.replace("Afgelopen ", "")}</button>`
+              `<button type="button" class="segment-btn ${state.period === key ? "is-active" : ""}" data-period="${key}">${periodSegmentLabel(key, p)}</button>`
           )
           .join("")}
       </div>
@@ -453,7 +468,7 @@ function renderCompare() {
       </ul>
       <p class="muted small sync-meta">Laatste sync: ${formatSyncTimestamp(state.settings?.last_sync_at)} · ${state.settings?.last_sync_message || "—"}</p>
       <button type="button" class="btn primary" id="syncBtn" ${state.syncing ? "disabled" : ""}>${state.syncing ? "Bezig met synchroniseren…" : "Synchroniseer met Home Assistant"}</button>
-      <p class="muted small">Vaker syncen is veilig: per uur/prijs-slot wordt bestaande data bijgewerkt (geen dubbele rijen).</p>
+      <p class="muted small">Sync haalt <strong>${syncDaysForPeriod()} dag(en)</strong> op (volgt gekozen periode${state.period === "day" ? ", testmodus 24 uur" : ""}). Vaker syncen is veilig — geen dubbele rijen.</p>
     </section>
   `;
 

@@ -323,6 +323,7 @@ function computeHourlyRows(limit = 200) {
         start,
         label: formatHourLabel(start),
         kwh,
+        fixedEurKwh: ctx.applyVat(ctx.fixed),
         dynamicEurKwh: null,
         delta: null,
         missingPrice: true,
@@ -332,12 +333,14 @@ function computeHourlyRows(limit = 200) {
 
     const dynamicCost = ctx.applyVat(energyCost + kwh * ctx.markup);
     const dynamicEurKwh = dynamicCost / kwh;
+    const fixedEurKwh = fixedCost / kwh;
     const delta = fixedCost - dynamicCost;
 
     rows.push({
       start,
       label: formatHourLabel(start),
       kwh,
+      fixedEurKwh,
       dynamicEurKwh,
       delta,
       missingPrice: false,
@@ -563,6 +566,7 @@ function renderData() {
       return `<tr>
         <td>${h.label}</td>
         <td class="num">${kwh(h.kwh, 2)}</td>
+        <td class="num">${euro(h.fixedEurKwh, 4)}</td>
         <td class="num">${h.dynamicEurKwh != null ? euro(h.dynamicEurKwh, 4) : "—"}</td>
         <td class="num">${deltaCell}</td>
       </tr>`;
@@ -583,7 +587,7 @@ function renderData() {
 
     <section class="card">
       <h2 class="card-title">Uren (${PERIODS[state.period].label.toLowerCase()})</h2>
-      <p class="muted small">Verschil = vast − dynamisch voor dat uur (positief = dynamisch goedkoper). Dynamische prijs incl. opslag/BTW uit instellingen.</p>
+      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Beide €/kWh-kolommen zijn all-in (markt-opslag + BTW uit Instellingen). Zet BTW op 0 als je vaste €0,28 al inclusief BTW is.</p>
       ${hourly.truncated ? `<p class="muted small warn-text">Toont ${hourly.rows.length} van ${hourly.total} uren met verbruik (nieuwste eerst).</p>` : ""}
       <div class="table-wrap">
         <table class="data-table">
@@ -591,12 +595,13 @@ function renderData() {
             <tr>
               <th>Uur</th>
               <th>Verbruik</th>
+              <th>Vast €/kWh</th>
               <th>Dynamisch €/kWh</th>
-              <th>Verschil</th>
+              <th>Verschil (€)</th>
             </tr>
           </thead>
           <tbody>
-            ${tableRows || `<tr><td colspan="4" class="muted">Geen uren met import in deze periode.</td></tr>`}
+            ${tableRows || `<tr><td colspan="5" class="muted">Geen uren met import in deze periode.</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -639,6 +644,7 @@ function renderSettings() {
       <label>BTW (0 = 0%, 0.21 = 21%)
         <input name="vat_rate" type="number" step="0.01" min="0" max="1" value="${s.vat_rate ?? 0}" />
       </label>
+      <p class="muted small">Vaste én dynamische prijs krijgen dezelfde BTW in de berekening. Is je vaste tarief <strong>al inclusief BTW</strong> (typisch op je contract)? Zet BTW dan op <strong>0</strong>.</p>
 
       <h2 class="card-title">Home Assistant</h2>
       <label>URL (bv. https://ha.local:8123)

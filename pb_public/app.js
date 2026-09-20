@@ -281,13 +281,77 @@ function priceForHour(hourStartMs, hourKwh, priceSlots) {
   return cost;
 }
 
-function computeSummary() {
+function calcContext() {
   const settings = state.settings || {};
   const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
   const markup = Number(settings.market_markup_eur_kwh ?? 0);
   const vat = Number(settings.vat_rate ?? 0);
+  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
+  return {
+    fixed,
+    markup,
+    vat,
+    applyVat,
+    priceSlots: buildPriceIndex(state.prices),
+  };
+}
 
-  const priceSlots = buildPriceIndex(state.prices);
+function formatHourLabel(date) {
+  return new Intl.DateTimeFormat("nl-NL", {
+    timeZone: "Europe/Amsterdam",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function computeHourlyRows(limit = 200) {
+  const ctx = calcContext();
+  const rows = [];
+
+  for (const row of state.consumption) {
+    const start = parsePbDate(row.period_start);
+    if (!start) continue;
+    const kwh = importKwh(row);
+    if (kwh <= 0) continue;
+
+    const fixedCost = ctx.applyVat(kwh * ctx.fixed);
+    const energyCost = priceForHour(start.getTime(), kwh, ctx.priceSlots);
+    if (energyCost == null) {
+      rows.push({
+        start,
+        label: formatHourLabel(start),
+        kwh,
+        dynamicEurKwh: null,
+        delta: null,
+        missingPrice: true,
+      });
+      continue;
+    }
+
+    const dynamicCost = ctx.applyVat(energyCost + kwh * ctx.markup);
+    const dynamicEurKwh = dynamicCost / kwh;
+    const delta = fixedCost - dynamicCost;
+
+    rows.push({
+      start,
+      label: formatHourLabel(start),
+      kwh,
+      dynamicEurKwh,
+      delta,
+      missingPrice: false,
+    });
+  }
+
+  rows.sort((a, b) => b.start.getTime() - a.start.getTime());
+  const truncated = rows.length > limit;
+  return { rows: rows.slice(0, limit), truncated, total: rows.length };
+}
+
+function computeSummary() {
+  const ctx = calcContext();
+  const { fixed, markup, applyVat, priceSlots } = ctx;
   let totalKwh = 0;
   let fixedCost = 0;
   let dynamicCost = 0;
@@ -312,7 +376,6 @@ function computeSummary() {
     dynamicCost += hourCost + kwh * markup;
   }
 
-  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
   fixedCost = applyVat(fixedCost);
   dynamicCost = applyVat(dynamicCost);
 
@@ -488,8 +551,57 @@ function renderData() {
   const last = state.consumption[state.consumption.length - 1];
   const first = state.consumption[0];
   const src = priceSourceCounts(state.prices);
+  const hourlyLimit = state.period === "day" ? 48 : state.period === "month" ? 744 : 200;
+  const hourly = computeHourlyRows(hourlyLimit);
+
+  const tableRows = hourly.rows
+    .map((h) => {
+      const deltaCell =
+        h.missingPrice
+          ? "—"
+          : `<span class="${h.delta >= 0 ? "ok-text" : "warn-text"}">${h.delta >= 0 ? "+" : ""}${euro(h.delta, 3)}</span>`;
+      return `<tr>
+        <td>${h.label}</td>
+        <td class="num">${kwh(h.kwh, 2)}</td>
+        <td class="num">${h.dynamicEurKwh != null ? euro(h.dynamicEurKwh, 4) : "—"}</td>
+        <td class="num">${deltaCell}</td>
+      </tr>`;
+    })
+    .join("");
 
   appEl.innerHTML = `
+    <section class="panel">
+      <div class="segment" role="tablist" aria-label="Periode">
+        ${Object.entries(PERIODS)
+          .map(
+            ([key, p]) =>
+              `<button type="button" class="segment-btn ${state.period === key ? "is-active" : ""}" data-period="${key}">${periodSegmentLabel(key, p)}</button>`
+          )
+          .join("")}
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">Uren (${PERIODS[state.period].label.toLowerCase()})</h2>
+      <p class="muted small">Verschil = vast − dynamisch voor dat uur (positief = dynamisch goedkoper). Dynamische prijs incl. opslag/BTW uit instellingen.</p>
+      ${hourly.truncated ? `<p class="muted small warn-text">Toont ${hourly.rows.length} van ${hourly.total} uren met verbruik (nieuwste eerst).</p>` : ""}
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Uur</th>
+              <th>Verbruik</th>
+              <th>Dynamisch €/kWh</th>
+              <th>Verschil</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${tableRows || `<tr><td colspan="4" class="muted">Geen uren met import in deze periode.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card">
       <h2 class="card-title">Dataset</h2>
       <dl class="kv">
@@ -504,6 +616,13 @@ function renderData() {
       </dl>
     </section>
   `;
+
+  appEl.querySelectorAll("[data-period]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      state.period = btn.dataset.period;
+      await refresh();
+    });
+  });
 }
 
 function renderSettings() {

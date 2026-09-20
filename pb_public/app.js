@@ -205,6 +205,7 @@ function pbFilterFrom(date) {
 const DEFAULT_SETTINGS = {
   label: "Standaard",
   fixed_tariff_eur_kwh: 0.28,
+  export_tariff_eur_kwh: 0.1,
   market_markup_eur_kwh: 0,
   vat_rate: 0,
   sensor_import_t1: "sensor.p1_energy_consumption_tarif_1",
@@ -495,6 +496,10 @@ function importKwh(row) {
   return (row.import_t1_kwh || 0) + (row.import_t2_kwh || 0);
 }
 
+function exportKwh(row) {
+  return (row.export_t1_kwh || 0) + (row.export_t2_kwh || 0);
+}
+
 function buildPriceIndex(priceRows) {
   const slots = priceRows
     .map((p) => ({
@@ -553,16 +558,22 @@ function priceForHour(hourStartMs, hourKwh, priceSlots) {
 function calcContext() {
   const settings = state.settings || {};
   const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
+  const exportFixed = Number(settings.export_tariff_eur_kwh ?? 0);
   const markup = Number(settings.market_markup_eur_kwh ?? 0);
   const vat = Number(settings.vat_rate ?? 0);
   const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
   return {
     fixed,
+    exportFixed,
     markup,
     vat,
     applyVat,
     priceSlots: buildPriceIndex(state.prices),
   };
+}
+
+function isExportInAvg() {
+  return Boolean(state.settings?.include_export_in_avg);
 }
 
 function formatHourLabel(date) {
@@ -623,48 +634,92 @@ function computeHourlyRows(limit = 200) {
 
 function computeSummary() {
   const ctx = calcContext();
-  const { fixed, markup, applyVat, priceSlots } = ctx;
+  const { fixed, exportFixed, markup, applyVat, priceSlots } = ctx;
   let totalKwh = 0;
-  let fixedCost = 0;
-  let dynamicCost = 0;
+  let totalExportKwh = 0;
+  let fixedImportCost = 0;
+  let dynamicImportCost = 0;
+  let fixedExportRevenue = 0;
+  let dynamicExportRevenue = 0;
   let matchedKwh = 0;
+  let matchedExportKwh = 0;
   let missingPriceHours = 0;
 
   for (const row of state.consumption) {
     const start = parsePbDate(row.period_start);
     if (!start) continue;
+    const ms = start.getTime();
     const kwh = importKwh(row);
-    if (kwh <= 0) continue;
+    const exp = exportKwh(row);
 
-    totalKwh += kwh;
-    fixedCost += kwh * fixed;
-
-    const hourCost = priceForHour(start.getTime(), kwh, priceSlots);
-    if (hourCost == null) {
-      missingPriceHours += 1;
-      continue;
+    if (kwh > 0) {
+      totalKwh += kwh;
+      fixedImportCost += kwh * fixed;
     }
-    matchedKwh += kwh;
-    dynamicCost += hourCost + kwh * markup;
+    if (exp > 0) {
+      totalExportKwh += exp;
+      fixedExportRevenue += exp * exportFixed;
+    }
+
+    const hourCost =
+      kwh > 0 ? priceForHour(ms, kwh, priceSlots) : null;
+    if (kwh > 0) {
+      if (hourCost == null) {
+        missingPriceHours += 1;
+      } else {
+        matchedKwh += kwh;
+        dynamicImportCost += hourCost + kwh * markup;
+      }
+    }
+
+    if (exp > 0) {
+      const exportEnergy = priceForHour(ms, exp, priceSlots);
+      if (exportEnergy != null) {
+        matchedExportKwh += exp;
+        dynamicExportRevenue += exportEnergy + exp * markup;
+      }
+    }
   }
 
-  fixedCost = applyVat(fixedCost);
-  dynamicCost = applyVat(dynamicCost);
+  fixedImportCost = applyVat(fixedImportCost);
+  dynamicImportCost = applyVat(dynamicImportCost);
+  fixedExportRevenue = applyVat(fixedExportRevenue);
+  dynamicExportRevenue = applyVat(dynamicExportRevenue);
 
-  const avgDynamic = matchedKwh > 0 ? dynamicCost / matchedKwh : null;
-  const delta = fixedCost - dynamicCost;
+  const netFixedCost = fixedImportCost - fixedExportRevenue;
+  const netDynamicCost = dynamicImportCost - dynamicExportRevenue;
+
+  const includeExport = isExportInAvg();
+  const avgDynamicImportOnly = matchedKwh > 0 ? dynamicImportCost / matchedKwh : null;
+  const avgDynamicNet =
+    includeExport && totalKwh > 0 ? netDynamicCost / totalKwh : avgDynamicImportOnly;
+  const avgFixedNet =
+    includeExport && totalKwh > 0 ? netFixedCost / totalKwh : null;
+
+  const delta = netFixedCost - netDynamicCost;
 
   return {
     fixed,
+    exportFixed,
+    exportFixedAllIn: applyVat(exportFixed),
     fixedAllIn: applyVat(fixed),
     vat: ctx.vat,
     markup,
     totalKwh,
+    totalExportKwh,
     matchedKwh,
+    matchedExportKwh,
     missingPriceHours,
-    fixedCost,
-    dynamicCost,
-    avgDynamic,
+    fixedImportCost,
+    dynamicImportCost,
+    fixedExportRevenue,
+    dynamicExportRevenue,
+    netFixedCost,
+    netDynamicCost,
+    avgDynamic: avgDynamicNet,
+    avgDynamicImportOnly,
+    avgFixedNet,
+    includeExportInAvg: includeExport,
     delta,
     priceSlotCount: priceSlots.length,
   };
@@ -689,6 +744,15 @@ async function persistMarketSyncMode(missingOnly) {
     body: JSON.stringify({ market_sync_missing_only: missingOnly }),
   });
   state.settings.market_sync_missing_only = missingOnly;
+}
+
+async function persistIncludeExportInAvg(include) {
+  if (!state.settings?.id) return;
+  await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ include_export_in_avg: include }),
+  });
+  state.settings.include_export_in_avg = include;
 }
 
 async function triggerSync() {
@@ -751,6 +815,7 @@ async function saveSettings(form) {
   const payload = {
     label: form.label.value.trim() || "Standaard",
     fixed_tariff_eur_kwh: Number(form.fixed_tariff_eur_kwh.value),
+    export_tariff_eur_kwh: Number(form.export_tariff_eur_kwh.value) || 0,
     market_markup_eur_kwh: Number(form.market_markup_eur_kwh.value) || 0,
     vat_rate: Number(form.vat_rate.value) || 0,
     ha_url: form.ha_url.value.trim(),
@@ -773,8 +838,17 @@ async function saveSettings(form) {
 
 function renderCompare() {
   const summary = computeSummary();
-  const period = PERIODS[state.period];
   const cheaper = summary.delta > 0 ? "dynamisch" : summary.delta < 0 ? "vast" : "gelijk";
+  const vatNote = summary.vat > 0 ? ", incl. BTW" : "";
+  const fixedHeroRate = summary.includeExportInAvg
+    ? summary.avgFixedNet
+    : summary.fixedAllIn;
+  const fixedHeroLabel = summary.includeExportInAvg
+    ? "Vast (gewogen netto)"
+    : "Vast contract (ingesteld)";
+  const avgLabel = summary.includeExportInAvg
+    ? `Gewogen gemiddelde netto per geïmporteerde kWh${vatNote}`
+    : `Gewogen gemiddelde import (dynamisch)${vatNote}`;
 
   appEl.innerHTML = `
     <section class="panel">
@@ -789,34 +863,55 @@ function renderCompare() {
     </section>
 
     <section class="hero card">
-      <p class="muted">Gewogen gemiddelde (dynamisch/simulatie)${summary.vat > 0 ? ", incl. BTW" : ""}</p>
+      <p class="muted">${avgLabel}</p>
       <p class="hero-value">${summary.avgDynamic != null ? euro(summary.avgDynamic, 4) : "—"}<span class="unit">/kWh</span></p>
-      <p class="muted small">Vast contract: <strong>${euro(summary.fixedAllIn, 4)}/kWh</strong>${summary.vat > 0 ? " incl. BTW" : ""}${summary.vat > 0 ? ` · excl. ${euro(summary.fixed, 4)}/kWh (ingesteld)` : " (ingesteld)"}</p>
+      <p class="muted small">${fixedHeroLabel}: <strong>${fixedHeroRate != null ? euro(fixedHeroRate, 4) : "—"}/kWh</strong>${summary.vat > 0 && !summary.includeExportInAvg ? " incl. BTW" : ""}${!summary.includeExportInAvg && summary.vat > 0 ? ` · excl. ${euro(summary.fixed, 4)}/kWh (ingesteld)` : ""}</p>
+      <p class="muted small" style="margin-top:10px">Export in gemiddelde:</p>
+      <div class="segment segment-2" role="group" aria-label="Export in gewogen gemiddelde">
+        <button type="button" class="segment-btn ${!summary.includeExportInAvg ? "is-active" : ""}" data-export-avg="off" ${state.syncing ? "disabled" : ""}>Alleen import</button>
+        <button type="button" class="segment-btn ${summary.includeExportInAvg ? "is-active" : ""}" data-export-avg="on" ${state.syncing ? "disabled" : ""}>Netto (import − export)</button>
+      </div>
+      ${summary.includeExportInAvg ? `<p class="muted small">(importkosten − exportopbrengst) ÷ ${kwh(summary.totalKwh)} import — vast én dynamisch.</p>` : ""}
     </section>
 
     <section class="grid-2">
       <article class="card stat">
-        <p class="muted">Kosten dynamisch</p>
-        <p class="stat-value">${summary.matchedKwh > 0 ? euro(summary.dynamicCost) : "—"}</p>
+        <p class="muted">Kosten import dynamisch</p>
+        <p class="stat-value">${summary.matchedKwh > 0 ? euro(summary.dynamicImportCost) : "—"}</p>
         <p class="muted small">${kwh(summary.matchedKwh)} met prijsdata</p>
       </article>
       <article class="card stat">
-        <p class="muted">Kosten vast</p>
-        <p class="stat-value">${euro(summary.fixedCost)}</p>
+        <p class="muted">Kosten import vast</p>
+        <p class="stat-value">${euro(summary.fixedImportCost)}</p>
         <p class="muted small">${kwh(summary.totalKwh)} import</p>
       </article>
     </section>
 
+    <section class="grid-2">
+      <article class="card stat">
+        <p class="muted">Opbrengst export dynamisch</p>
+        <p class="stat-value ok-text">${summary.matchedExportKwh > 0 ? euro(summary.dynamicExportRevenue) : "—"}</p>
+        <p class="muted small">${kwh(summary.matchedExportKwh)} met prijsdata · ${kwh(summary.totalExportKwh)} totaal export</p>
+      </article>
+      <article class="card stat">
+        <p class="muted">Opbrengst export vast</p>
+        <p class="stat-value ok-text">${summary.totalExportKwh > 0 ? euro(summary.fixedExportRevenue) : "—"}</p>
+        <p class="muted small">${kwh(summary.totalExportKwh)} export · ${euro(summary.exportFixedAllIn, 4)}/kWh${summary.vat > 0 ? " incl. BTW" : ""}</p>
+      </article>
+    </section>
+
     <section class="card highlight ${summary.delta >= 0 ? "ok" : "warn"}">
-      <p class="muted">Verschil in periode (${cheaper} voordeliger)</p>
+      <p class="muted">Netto verschil in periode (${cheaper} voordeliger)</p>
       <p class="stat-value">${euro(Math.abs(summary.delta))}</p>
+      <p class="muted small">Import − export: vast ${euro(summary.netFixedCost)} vs dynamisch ${summary.matchedKwh > 0 ? euro(summary.netDynamicCost) : "—"}</p>
       <p class="muted small">${summary.delta >= 0 ? "Je zou met dynamisch minder betalen (simulatie)" : "Vast is goedkoper in deze simulatie"}</p>
     </section>
 
     <section class="card">
       <h2 class="card-title">Toelichting</h2>
       <ul class="notes">
-        <li>Verbruik: P1 import tarief 1 + 2 per uur uit Home Assistant statistieken.</li>
+        <li>Verbruik: P1 import én export tarief 1 + 2 per uur uit Home Assistant. Export dynamisch = zelfde day-ahead + opslag als import; vast export = ingestelde vergoeding.</li>
+        <li>Netto gemiddelde (knop): (totale importkosten − exportopbrengst) gedeeld door alle geïmporteerde kWh — voor vast én dynamisch.</li>
         <li>Prijzen: day-ahead NL (Energy-Charts) + optioneel HA prijssensor. Uurverbruik wordt evenredig over prijs-slots in dat uur verdeeld.</li>
         <li>Opslag/belasting: stel <strong>markt-opslag</strong> en BTW in onder Instellingen voor vergelijkbare all-in tarieven.</li>
         ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch). Laat het veld Nordpool/HA-prijs leeg en synchroniseer opnieuw om NL day-ahead (Energy-Charts) te gebruiken — zie tab Data.</li>` : ""}
@@ -845,6 +940,19 @@ function renderCompare() {
       try {
         await persistMarketSyncMode(missingOnly);
         toast(missingOnly ? "Markt: alleen ontbrekende dagen" : "Markt: hele periode opnieuw");
+        render();
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  });
+  appEl.querySelectorAll("[data-export-avg]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (state.syncing) return;
+      const include = btn.dataset.exportAvg === "on";
+      try {
+        await persistIncludeExportInAvg(include);
+        toast(include ? "Gemiddelde: netto incl. export" : "Gemiddelde: alleen import");
         render();
       } catch (e) {
         toast(e.message);
@@ -996,8 +1104,11 @@ function renderSettings() {
   appEl.innerHTML = `
     <form class="card form" id="settingsForm">
       <h2 class="card-title">Tarief</h2>
-      <label>Vaste prijs (€/kWh)
+      <label>Vaste importprijs (€/kWh, excl. BTW)
         <input name="fixed_tariff_eur_kwh" type="number" step="0.0001" min="0" value="${s.fixed_tariff_eur_kwh ?? 0.28}" required />
+      </label>
+      <label>Vaste exportvergoeding (€/kWh, excl. BTW)
+        <input name="export_tariff_eur_kwh" type="number" step="0.0001" min="0" value="${s.export_tariff_eur_kwh ?? 0.1}" />
       </label>
       <label>Markt-opslag dynamisch (€/kWh)
         <input name="market_markup_eur_kwh" type="number" step="0.0001" min="0" value="${s.market_markup_eur_kwh ?? 0}" />

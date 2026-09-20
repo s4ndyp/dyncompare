@@ -21,6 +21,7 @@ app.add_middleware(
 class SyncRequest(BaseModel):
     days: int = Field(default=400, ge=1, le=730)
     include_market_prices: bool = True
+    market_missing_only: bool | None = None
 
 
 @app.get("/health")
@@ -37,6 +38,7 @@ async def sync(body: SyncRequest | None = None) -> dict:
             pb,
             days=body.days,
             include_market_prices=body.include_market_prices,
+            market_missing_only=body.market_missing_only,
         )
     except Exception as exc:  # noqa: BLE001 — API boundary
         try:

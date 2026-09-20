@@ -33,6 +33,8 @@ docker compose up -d --build
 
 **Vaker syncen** mag: per uur/prijs-slot wordt de bestaande rij **bijgewerkt** (unique index op `period_start`), geen dubbele records.
 
+**Marktprijzen incrementeel:** op Vergelijk kun je **Alleen ontbrekende dagen** kiezen — dan worden alleen kalenderdagen in de sync-periode zonder markt-slots opgehaald (minder Energy-Charts/ENTSO-E calls). Verbruik uit Home Assistant wordt altijd voor de hele periode ververst.
+
 ## Dynamische prijzen (Nordpool / markt)
 
 **Standaard hoef je geen Nordpool-sensor in te vullen.** Bij elke sync haalt DynCompare **NL day-ahead** prijzen op via [Energy-Charts](https://api.energy-charts.info/) — dat is maanden aan marktprijs (EUR/kWh), los van je HA-setup.

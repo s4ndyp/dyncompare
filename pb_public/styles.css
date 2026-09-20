@@ -101,6 +101,38 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 .highlight.ok { border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
 .highlight.warn { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
 .warn-text { color: var(--warn); }
+.ok-text { color: var(--ok); }
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.data-table th,
+.data-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.data-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: #12151d;
+  position: sticky;
+  top: 0;
+}
+.data-table tbody tr:last-child td { border-bottom: 0; }
+.data-table td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .notes { margin: 0 0 16px; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .notes strong { color: var(--text); font-weight: 600; }

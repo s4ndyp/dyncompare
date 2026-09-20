@@ -113,6 +113,9 @@ class PocketBaseClient:
     async def batch_upsert_price_slots(self, rows: list[dict[str, Any]]) -> int:
         saved = 0
         for row in rows:
+            price = row.get("price_eur_kwh")
+            if not isinstance(price, (int, float)) or price != price:  # NaN
+                continue
             await self.upsert_by_period("price_slots", row["period_start"], row)
             saved += 1
         return saved

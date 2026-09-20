@@ -73,7 +73,7 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 
 .segment {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 6px;
   background: var(--card);
   border: 1px solid var(--line);

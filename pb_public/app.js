@@ -5,6 +5,8 @@ const PERIODS = {
   year: { label: "Afgelopen jaar", days: 366, syncDays: 366 },
 };
 
+const STATS_HISTORY_DAYS = 730;
+
 const AMS_TZ = "Europe/Amsterdam";
 
 function amsterdamYearMonth(date = new Date()) {
@@ -121,6 +123,8 @@ const state = {
   chartWeekStart: amsterdamWeekStart(),
   chartConsumption: [],
   chartPrices: [],
+  statsConsumption: [],
+  statsPrices: [],
   priceChart: null,
   diffChart: null,
   loading: false,
@@ -1022,6 +1026,143 @@ function computeSummary() {
   };
 }
 
+function amsterdamMonthKey(date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: AMS_TZ,
+    year: "numeric",
+    month: "2-digit",
+  }).format(date);
+}
+
+function monthKeyLabel(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  return new Intl.DateTimeFormat("nl-NL", {
+    timeZone: AMS_TZ,
+    month: "long",
+    year: "numeric",
+  }).format(new Date(Date.UTC(y, m - 1, 15)));
+}
+
+function calcStatsContext() {
+  const settings = state.settings || {};
+  const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
+  const exportFixed = Number(settings.export_tariff_eur_kwh ?? 0);
+  const markup = Number(settings.market_markup_eur_kwh ?? 0);
+  const vat = Number(settings.vat_rate ?? 0);
+  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
+  return {
+    fixed,
+    exportFixed,
+    markup,
+    vat,
+    applyVat,
+    priceSlots: buildPriceIndex(state.statsPrices || []),
+  };
+}
+
+function emptyMonthBucket() {
+  return {
+    importKwh: 0,
+    exportKwh: 0,
+    fixedImportEx: 0,
+    fixedExportEx: 0,
+    dynamicImportEx: 0,
+    dynamicExportEx: 0,
+  };
+}
+
+function computeMonthlyStatistics() {
+  const ctx = calcStatsContext();
+  const { fixed, exportFixed, markup, applyVat, priceSlots } = ctx;
+  const buckets = new Map();
+
+  for (const row of state.statsConsumption || []) {
+    const start = parsePbDate(row.period_start);
+    if (!start) continue;
+    const monthKey = amsterdamMonthKey(start);
+    if (!buckets.has(monthKey)) buckets.set(monthKey, emptyMonthBucket());
+    const b = buckets.get(monthKey);
+    const ms = start.getTime();
+    const kwh = importKwh(row);
+    const exp = exportKwh(row);
+
+    if (kwh > 0) {
+      b.importKwh += kwh;
+      b.fixedImportEx += kwh * fixed;
+      const hourCost = priceForHour(ms, kwh, priceSlots);
+      if (hourCost != null) {
+        b.dynamicImportEx += hourCost + kwh * markup;
+      }
+    }
+    if (exp > 0) {
+      b.exportKwh += exp;
+      b.fixedExportEx += exp * exportFixed;
+      const exportEnergy = priceForHour(ms, exp, priceSlots);
+      if (exportEnergy != null) {
+        b.dynamicExportEx += exportEnergy + exp * markup;
+      }
+    }
+  }
+
+  const rows = [...buckets.entries()]
+    .map(([monthKey, b]) => {
+      const fixedImport = applyVat(b.fixedImportEx);
+      const fixedExport = applyVat(b.fixedExportEx);
+      const dynamicImport = applyVat(b.dynamicImportEx);
+      const dynamicExport = applyVat(b.dynamicExportEx);
+      const netFixed = fixedImport - fixedExport;
+      const netDynamic = dynamicImport - dynamicExport;
+      const avgFixedNet = b.importKwh > 0 ? netFixed / b.importKwh : null;
+      const avgDynamicNet = b.importKwh > 0 ? netDynamic / b.importKwh : null;
+      return {
+        monthKey,
+        label: monthKeyLabel(monthKey),
+        importKwh: b.importKwh,
+        exportKwh: b.exportKwh,
+        fixedImport,
+        fixedExport,
+        dynamicImport,
+        dynamicExport,
+        avgFixedNet,
+        avgDynamicNet,
+        netFixed,
+        netDynamic,
+      };
+    })
+    .filter((r) => r.importKwh > 0 || r.exportKwh > 0)
+    .sort((a, b) => b.monthKey.localeCompare(a.monthKey));
+
+  return { rows, vat: ctx.vat };
+}
+
+async function loadStatisticsData() {
+  const end = new Date();
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - STATS_HISTORY_DAYS);
+  const filter = `period_start >= "${pbFilterFrom(start)}"`;
+  state.statsConsumption = await listAll("consumption_hours", {
+    filter,
+    sort: "period_start",
+  });
+  state.statsPrices = await listAll("price_slots", {
+    filter,
+    sort: "period_start",
+  });
+}
+
+async function refreshStatisticsView() {
+  state.loading = true;
+  try {
+    await loadSettings();
+    await loadStatisticsData();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
 function syncServiceUrl() {
   const fromSettings = (state.settings?.sync_service_url || "").trim();
   if (fromSettings) return fromSettings.replace(/\/$/, "");
@@ -1471,6 +1612,52 @@ function renderCharts() {
   }
 }
 
+function renderStatistics() {
+  const { rows, vat } = computeMonthlyStatistics();
+  const vatNote = vat > 0 ? " incl. BTW" : "";
+
+  const tableRows = rows
+    .map(
+      (m) => `<tr>
+        <td>${m.label}</td>
+        <td class="num">${m.dynamicImport > 0 ? euro(m.dynamicImport) : "—"}</td>
+        <td class="num ok-text">${m.dynamicExport > 0 ? euro(m.dynamicExport) : "—"}</td>
+        <td class="num">${m.fixedImport > 0 ? euro(m.fixedImport) : "—"}</td>
+        <td class="num ok-text">${m.fixedExport > 0 ? euro(m.fixedExport) : "—"}</td>
+        <td class="num">${m.avgDynamicNet != null ? euro(m.avgDynamicNet, 4) : "—"}</td>
+        <td class="num">${m.avgFixedNet != null ? euro(m.avgFixedNet, 4) : "—"}</td>
+      </tr>`
+    )
+    .join("");
+
+  appEl.innerHTML = `
+    <section class="card">
+      <h2 class="card-title">Maandoverzicht</h2>
+      <p class="muted small">Totalen en gewogen gemiddelde netto per geïmporteerde kWh (import − export)${vatNote}. Dynamisch = day-ahead + opslag. Per kalendermaand (${AMS_TZ === "Europe/Amsterdam" ? "Nederland" : AMS_TZ}).</p>
+      <p class="muted small">Data: laatste <strong>${STATS_HISTORY_DAYS}</strong> dagen uit de database (max. sync-periode).</p>
+      <div class="table-wrap">
+        <table class="data-table stats-table">
+          <thead>
+            <tr>
+              <th>Maand</th>
+              <th>Import dyn.</th>
+              <th>Export dyn.</th>
+              <th>Import vast</th>
+              <th>Export vast</th>
+              <th>Gem. dyn.</th>
+              <th>Gem. vast</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${tableRows || `<tr><td colspan="7" class="muted">Geen verbruiksdata in deze periode. Synchroniseer eerst met Home Assistant.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small">Gem. = (importkosten − exportopbrengst) ÷ import kWh die maand. Exportkolommen zijn opbrengst (niet de netto-aftrek).</p>
+    </section>
+  `;
+}
+
 function renderSettings() {
   const s = state.settings || {};
   appEl.innerHTML = `
@@ -1541,11 +1728,19 @@ function renderSettings() {
 }
 
 function render() {
-  const titles = { compare: "Vergelijk", data: "Data", charts: "Grafiek", settings: "Instellingen" };
+  const titles = {
+    compare: "Vergelijk",
+    data: "Data",
+    charts: "Grafiek",
+    statistics: "Statistieken",
+    settings: "Instellingen",
+  };
   pageTitle.textContent = titles[state.view] || "DynCompare";
 
   if (state.view === "charts") {
     periodLabel.textContent = chartRangeTitle();
+  } else if (state.view === "statistics") {
+    periodLabel.textContent = `Maanden (${STATS_HISTORY_DAYS} dagen)`;
   } else {
     periodLabel.textContent = PERIODS[state.period].label;
   }
@@ -1553,6 +1748,7 @@ function render() {
   if (state.view === "compare") renderCompare();
   else if (state.view === "data") renderData();
   else if (state.view === "charts") renderCharts();
+  else if (state.view === "statistics") renderStatistics();
   else renderSettings();
 }
 
@@ -1577,6 +1773,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     state.view = tab.dataset.view;
     if (prev === "charts" && state.view !== "charts") destroyCharts();
     if (state.view === "charts") refreshChartView();
+    else if (state.view === "statistics") refreshStatisticsView();
     else render();
   });
 });
@@ -1584,6 +1781,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
 refreshBtn?.addEventListener("click", () => {
   if (state.syncing) return;
   if (state.view === "charts") refreshChartView();
+  else if (state.view === "statistics") refreshStatisticsView();
   else refresh();
 });
 

@@ -8,7 +8,8 @@ const PERIODS = {
 
 const STATS_HISTORY_DAYS = 730;
 
-const PRICE_EXPLORE_VAT_RATE = 0.21;
+/** Day-ahead slots uit markt-API zijn excl. BTW; vaste tarieven/opslag in instellingen zijn incl. BTW. */
+const MARKET_DAY_AHEAD_VAT_RATE = 0.21;
 
 const PRICE_EXPLORE_FILTERS = {
   today_tomorrow: { label: "Vandaag + morgen" },
@@ -155,6 +156,29 @@ const PRICE_SLOT_SOURCES = new Set(["market", "home_assistant", "manual"]);
 /** Tarieven uit Instellingen zijn all-in (incl. BTW); geen extra BTW in berekeningen. */
 function applyTariffAmount(n) {
   return n;
+}
+
+/**
+ * Dynamisch consumententarief €/kWh.
+ * Day-ahead uit API is excl. BTW; markt-opslag uit Instellingen is incl. BTW.
+ * BTW aan: alleen over day-ahead, daarna incl.-opslag optellen (geen dubbele BTW).
+ */
+function dynamicRateEurKwh(rawEurKwh, markupEurKwh, opts = {}) {
+  const includeMarkup = opts.includeMarkup !== false;
+  const includeVat = opts.includeVat !== false;
+  const markup = includeMarkup ? Number(markupEurKwh) || 0 : 0;
+  const raw = Number(rawEurKwh);
+  if (!Number.isFinite(raw)) {
+    return includeMarkup ? markup : null;
+  }
+  const dayAhead = includeVat ? raw * (1 + MARKET_DAY_AHEAD_VAT_RATE) : raw;
+  return dayAhead + markup;
+}
+
+function dynamicEnergyCost(rawEnergyCostTotal, kwh, markupEurKwh, opts) {
+  if (rawEnergyCostTotal == null || kwh <= 0) return null;
+  const rate = dynamicRateEurKwh(rawEnergyCostTotal / kwh, markupEurKwh, opts);
+  return rate == null ? null : rate * kwh;
 }
 
 const SETTINGS_IMPORT_FIELDS = [
@@ -499,7 +523,7 @@ function buildWeekCostPoints(weekStart) {
     if (energyCost == null) continue;
 
     const fixedCost = applyVat(kwh * fixed);
-    const dynamicCost = applyVat(energyCost + kwh * markup);
+    const dynamicCost = dynamicEnergyCost(energyCost, kwh, markup);
     points.push({
       ms,
       label: formatHourLabel(start),
@@ -528,7 +552,7 @@ function buildMonthChartPoints(year, month) {
     .map((ms) => {
       const raw = hourlyMarketRateEurKwh(ms, slots);
       if (raw == null) return null;
-      const market = ctx.applyVat(raw + ctx.markup);
+      const market = dynamicRateEurKwh(raw, ctx.markup);
       return {
         ms,
         label: formatHourLabel(new Date(ms)),
@@ -951,7 +975,7 @@ function computeHourlyRows(limit = 200) {
       continue;
     }
 
-    const dynamicCost = ctx.applyVat(energyCost + kwh * ctx.markup);
+    const dynamicCost = dynamicEnergyCost(energyCost, kwh, ctx.markup);
     const dynamicEurKwh = dynamicCost / kwh;
     const fixedEurKwh = fixedCost / kwh;
     const delta = fixedCost - dynamicCost;
@@ -1008,7 +1032,7 @@ function computeSummary() {
         missingPriceHours += 1;
       } else {
         matchedKwh += kwh;
-        dynamicImportCost += hourCost + kwh * markup;
+        dynamicImportCost += dynamicEnergyCost(hourCost, kwh, markup) ?? 0;
       }
     }
 
@@ -1016,15 +1040,13 @@ function computeSummary() {
       const exportEnergy = priceForHour(ms, exp, priceSlots);
       if (exportEnergy != null) {
         matchedExportKwh += exp;
-        dynamicExportRevenue += exportEnergy + exp * markup;
+        dynamicExportRevenue += dynamicEnergyCost(exportEnergy, exp, markup) ?? 0;
       }
     }
   }
 
   fixedImportCost = applyVat(fixedImportCost);
-  dynamicImportCost = applyVat(dynamicImportCost);
   fixedExportRevenue = applyVat(fixedExportRevenue);
-  dynamicExportRevenue = applyVat(dynamicExportRevenue);
 
   const netFixedCost = fixedImportCost - fixedExportRevenue;
   const netDynamicCost = dynamicImportCost - dynamicExportRevenue;
@@ -1101,8 +1123,8 @@ function emptyMonthBucket() {
     exportKwh: 0,
     fixedImportEx: 0,
     fixedExportEx: 0,
-    dynamicImportEx: 0,
-    dynamicExportEx: 0,
+    dynamicImportCost: 0,
+    dynamicExportCost: 0,
   };
 }
 
@@ -1132,17 +1154,15 @@ function computeMonthlyStatistics() {
       b.importKwh += kwh;
       b.fixedImportEx += kwh * fixed;
       const hourCost = priceForHour(ms, kwh, priceSlots);
-      if (hourCost != null) {
-        b.dynamicImportEx += hourCost + kwh * markup;
-      }
+      const dc = dynamicEnergyCost(hourCost, kwh, markup);
+      if (dc != null) b.dynamicImportCost += dc;
     }
     if (exp > 0) {
       b.exportKwh += exp;
       b.fixedExportEx += exp * exportFixed;
       const exportEnergy = priceForHour(ms, exp, priceSlots);
-      if (exportEnergy != null) {
-        b.dynamicExportEx += exportEnergy + exp * markup;
-      }
+      const ec = dynamicEnergyCost(exportEnergy, exp, markup);
+      if (ec != null) b.dynamicExportCost += ec;
     }
   }
 
@@ -1150,8 +1170,8 @@ function computeMonthlyStatistics() {
     .map(([monthKey, b]) => {
       const fixedImport = applyVat(b.fixedImportEx);
       const fixedExport = applyVat(b.fixedExportEx);
-      const dynamicImport = applyVat(b.dynamicImportEx);
-      const dynamicExport = applyVat(b.dynamicExportEx);
+      const dynamicImport = b.dynamicImportCost;
+      const dynamicExport = b.dynamicExportCost;
       const netFixed = fixedImport - fixedExport;
       const netDynamic = dynamicImport - dynamicExport;
       const avgFixedNet = b.importKwh > 0 ? netFixed / b.importKwh : null;
@@ -1242,16 +1262,10 @@ async function loadPriceExploreData() {
 }
 
 function displayDynamicEnergyPrice(rawEurKwh) {
-  const raw = Number(rawEurKwh);
-  if (!Number.isFinite(raw)) return null;
-  let p = raw;
-  if (state.priceExploreMarkup) {
-    p += Number(state.settings?.market_markup_eur_kwh ?? 0);
-  }
-  if (state.priceExploreVat) {
-    p *= 1 + PRICE_EXPLORE_VAT_RATE;
-  }
-  return p;
+  return dynamicRateEurKwh(rawEurKwh, state.settings?.market_markup_eur_kwh ?? 0, {
+    includeMarkup: state.priceExploreMarkup,
+    includeVat: state.priceExploreVat,
+  });
 }
 
 function amsterdamHourBucketMs(instant) {
@@ -1423,7 +1437,7 @@ function renderEnergyPrices() {
       </div>
     </section>
     <section class="card">
-      <p class="muted small">Day-ahead marktprijs (Energy-Charts/ENTSO-E). Toeslag = instelling <strong>markt-opslag</strong>; BTW = ${Math.round(PRICE_EXPLORE_VAT_RATE * 100)}% over day-ahead + toeslag (alleen weergave).</p>
+      <p class="muted small">Day-ahead excl. BTW uit API. <strong>BTW aan</strong>: day-ahead × ${1 + MARKET_DAY_AHEAD_VAT_RATE} + opslag (opslag incl. BTW uit Instellingen — niet nogmaals belast). Zelfde als Data/Vergelijk bij toeslag + BTW aan.</p>
       <p class="muted small">Weergave:</p>
       <div class="segment segment-2" role="group" aria-label="Toeslag">
         <button type="button" class="segment-btn ${state.priceExploreMarkup ? "is-active" : ""}" data-price-markup="on">Toeslag aan</button>
@@ -2164,7 +2178,7 @@ function renderData() {
 
     <section class="card">
       <h2 class="card-title">Uren (${PERIODS[state.period].label.toLowerCase()})</h2>
-      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Beide €/kWh-kolommen zijn all-in (Instellingen + markt day-ahead + opslag).</p>
+      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Vast incl. BTW (Instellingen). Dynamisch = day-ahead × ${1 + MARKET_DAY_AHEAD_VAT_RATE} + opslag (incl. BTW) — zelfde als tab Prijzen met toeslag + BTW aan.</p>
       ${hourly.truncated ? `<p class="muted small warn-text">Toont ${hourly.rows.length} van ${hourly.total} uren met verbruik (nieuwste eerst).</p>` : ""}
       <div class="table-wrap">
         <table class="data-table data-table-hours">

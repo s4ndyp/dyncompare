@@ -1,5 +1,6 @@
 const PERIODS = {
   day: { label: "Laatste 24 uur", days: 1, hours: 24, syncDays: 1 },
+  week: { label: "Laatste 7 dagen", days: 7, syncDays: 7 },
   month: { label: "Afgelopen maand", days: 31, syncDays: 31 },
   halfyear: { label: "Afgelopen 6 maanden", days: 183, syncDays: 183 },
   year: { label: "Afgelopen jaar", days: 366, syncDays: 366 },
@@ -323,7 +324,8 @@ function syncDaysForPeriod() {
 
 function periodSegmentLabel(key, period) {
   if (key === "day") return "24 uur";
-  return period.label.replace("Afgelopen ", "");
+  if (key === "week") return "7 dagen";
+  return period.label.replace("Laatste ", "").replace("Afgelopen ", "");
 }
 
 function pbFilterFrom(date) {
@@ -1092,6 +1094,13 @@ function emptyMonthBucket() {
   };
 }
 
+function formatMonthNetCostDiff(diff) {
+  if (!Number.isFinite(diff)) return "—";
+  const cls = diff <= 0 ? "ok-text" : "warn-text";
+  const prefix = diff > 0 ? "+" : "";
+  return `<span class="${cls}">${prefix}${euro(diff)}</span>`;
+}
+
 function computeMonthlyStatistics() {
   const ctx = calcStatsContext();
   const { fixed, exportFixed, markup, applyVat, priceSlots } = ctx;
@@ -1148,6 +1157,7 @@ function computeMonthlyStatistics() {
         avgDynamicNet,
         netFixed,
         netDynamic,
+        netCostDiff: netDynamic - netFixed,
       };
     })
     .filter((r) => r.importKwh > 0 || r.exportKwh > 0)
@@ -1804,7 +1814,14 @@ function renderData() {
   const last = state.consumption[state.consumption.length - 1];
   const first = state.consumption[0];
   const src = priceSourceCounts(state.prices);
-  const hourlyLimit = state.period === "day" ? 48 : state.period === "month" ? 744 : 200;
+  const hourlyLimit =
+    state.period === "day"
+      ? 48
+      : state.period === "week"
+        ? 168
+        : state.period === "month"
+          ? 744
+          : 200;
   const hourly = computeHourlyRows(hourlyLimit);
 
   const tableRows = hourly.rows
@@ -2019,6 +2036,7 @@ function renderStatistics() {
         <td class="num ok-text">${m.fixedExport > 0 ? euro(m.fixedExport) : "—"}</td>
         <td class="num">${m.avgDynamicNet != null ? euro(m.avgDynamicNet, 4) : "—"}</td>
         <td class="num">${m.avgFixedNet != null ? euro(m.avgFixedNet, 4) : "—"}</td>
+        <td class="num">${formatMonthNetCostDiff(m.netCostDiff)}</td>
       </tr>`
     )
     .join("");
@@ -2032,7 +2050,7 @@ function renderStatistics() {
         <table class="data-table stats-table">
           <colgroup>
             <col class="col-label" />
-            <col span="6" class="col-num" />
+            <col span="7" class="col-num" />
           </colgroup>
           <thead>
             <tr>
@@ -2043,14 +2061,15 @@ function renderStatistics() {
               <th scope="col" class="num">Export vast</th>
               <th scope="col" class="num">Gem. dyn.</th>
               <th scope="col" class="num">Gem. vast</th>
+              <th scope="col" class="num">Verschil netto</th>
             </tr>
           </thead>
           <tbody>
-            ${tableRows || `<tr><td colspan="7" class="muted">Geen verbruiksdata in deze periode. Synchroniseer eerst met Home Assistant.</td></tr>`}
+            ${tableRows || `<tr><td colspan="8" class="muted">Geen verbruiksdata in deze periode. Synchroniseer eerst met Home Assistant.</td></tr>`}
           </tbody>
         </table>
       </div>
-      <p class="muted small">Gem. = (importkosten − exportopbrengst) ÷ import kWh die maand. Exportkolommen zijn opbrengst (niet de netto-aftrek).</p>
+      <p class="muted small">Gem. = (importkosten − exportopbrengst) ÷ import kWh die maand. Exportkolommen zijn opbrengst (niet de netto-aftrek). <strong>Verschil netto</strong> = (import dyn. − export dyn.) − (import vast − export vast); negatief = dynamisch goedkoper die maand.</p>
       <h3 class="card-title" style="margin-top:16px">JSON-export</h3>
       <p class="muted small">Zelfde ${STATS_HISTORY_DAYS}-dagen set als deze tabel: verbruik + prijs-slots (kwartier indien aanwezig).</p>
       <div class="export-actions">

@@ -1357,6 +1357,24 @@ function buildPriceExplorePoints() {
   return buildSlotPriceExplorePoints();
 }
 
+function fixedTariffForPriceCompare() {
+  return Number(state.settings?.fixed_tariff_eur_kwh ?? 0.28);
+}
+
+function energyPriceBarStyle(priceEurKwh) {
+  const fixed = fixedTariffForPriceCompare();
+  if (!Number.isFinite(priceEurKwh) || !Number.isFinite(fixed) || fixed <= 0) {
+    return { bg: "rgba(124, 156, 255, 0.78)", border: "#7c9cff" };
+  }
+  if (priceEurKwh < fixed) {
+    return { bg: "rgba(74, 222, 128, 0.85)", border: "rgba(34, 197, 94, 0.95)" };
+  }
+  if (priceEurKwh <= fixed * 2) {
+    return { bg: "rgba(251, 146, 60, 0.85)", border: "rgba(234, 88, 12, 0.95)" };
+  }
+  return { bg: "rgba(248, 113, 113, 0.9)", border: "rgba(239, 68, 68, 0.95)" };
+}
+
 function mountEnergyPriceChart() {
   if (typeof Chart === "undefined") {
     toast("Grafiek-library niet geladen");
@@ -1369,7 +1387,9 @@ function mountEnergyPriceChart() {
 
   const labels = points.map((p) => p.label);
   const data = points.map((p) => p.price);
+  const styles = data.map((p) => energyPriceBarStyle(p));
   const maxTicks = state.priceExploreFilter === "today_tomorrow" ? 12 : 8;
+  const fixed = fixedTariffForPriceCompare();
 
   state.energyPriceChart = new Chart(canvas, {
     type: "bar",
@@ -1379,8 +1399,8 @@ function mountEnergyPriceChart() {
         {
           label: "Dynamische prijs",
           data,
-          backgroundColor: "rgba(124, 156, 255, 0.78)",
-          borderColor: "#7c9cff",
+          backgroundColor: styles.map((s) => s.bg),
+          borderColor: styles.map((s) => s.border),
           borderWidth: 1,
         },
       ],
@@ -1400,6 +1420,13 @@ function mountEnergyPriceChart() {
             },
             label(ctx) {
               return `${euro(ctx.parsed.y, 4)}/kWh`;
+            },
+            afterLabel(ctx) {
+              if (!Number.isFinite(fixed) || fixed <= 0) return "";
+              const v = ctx.parsed.y;
+              if (v < fixed) return `Onder vast (${euro(fixed, 4)}/kWh)`;
+              if (v <= fixed * 2) return `Tussen vast en 2× vast`;
+              return `Boven 2× vast (${euro(fixed * 2, 4)}/kWh)`;
             },
           },
         },
@@ -1456,7 +1483,12 @@ function renderEnergyPrices() {
           ? `<div class="chart-canvas-wrap chart-canvas-wrap-week">
         <canvas id="energyPriceChartCanvas" aria-label="Dynamische energieprijs"></canvas>
       </div>
-      <p class="muted small">${points.length} ${modeSlot ? "slots" : "uren"} · ${modeSlot ? "Werkelijke slot-interval (o.a. 15 min)" : "Gewogen gemiddelde per kalenderuur (Europe/Amsterdam)"}</p>`
+      <div class="chart-legend">
+        <span class="legend-green">Onder vast (${euro(fixedTariffForPriceCompare(), 4)}/kWh)</span>
+        <span class="legend-orange">Vast t/m 2× vast</span>
+        <span class="legend-red">Boven 2× vast</span>
+      </div>
+      <p class="muted small">${points.length} ${modeSlot ? "slots" : "uren"} · kleuren vs vaste importprijs (Instellingen, incl. BTW)</p>`
           : `<p class="muted">Geen marktprijsdata in deze periode. Synchroniseer marktprijzen (tab Vergelijk).</p>`
       }
     </section>

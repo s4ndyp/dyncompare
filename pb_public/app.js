@@ -1361,18 +1361,24 @@ function fixedTariffForPriceCompare() {
   return Number(state.settings?.fixed_tariff_eur_kwh ?? 0.28);
 }
 
-function energyPriceBarStyle(priceEurKwh) {
-  const fixed = fixedTariffForPriceCompare();
-  if (!Number.isFinite(priceEurKwh) || !Number.isFinite(fixed) || fixed <= 0) {
-    return { bg: "rgba(124, 156, 255, 0.78)", border: "#7c9cff" };
+/** Gestapelde segmenthoogtes €/kWh t.o.v. vaste prijs F (groen tot F, geel tot +50%, oranje tot +100%, rood daarboven). */
+function energyPriceStackSegments(priceEurKwh, fixed) {
+  if (!Number.isFinite(priceEurKwh) || priceEurKwh <= 0) {
+    return { green: 0, yellow: 0, orange: 0, red: 0 };
   }
-  if (priceEurKwh < fixed) {
-    return { bg: "rgba(74, 222, 128, 0.85)", border: "rgba(34, 197, 94, 0.95)" };
+  if (!Number.isFinite(fixed) || fixed <= 0) {
+    return { green: priceEurKwh, yellow: 0, orange: 0, red: 0 };
   }
-  if (priceEurKwh <= fixed * 2) {
-    return { bg: "rgba(251, 146, 60, 0.85)", border: "rgba(234, 88, 12, 0.95)" };
-  }
-  return { bg: "rgba(248, 113, 113, 0.9)", border: "rgba(239, 68, 68, 0.95)" };
+  const p = priceEurKwh;
+  const f = fixed;
+  const f150 = f * 1.5;
+  const f200 = f * 2;
+  return {
+    green: Math.min(p, f),
+    yellow: p > f ? Math.min(p, f150) - f : 0,
+    orange: p > f150 ? Math.min(p, f200) - f150 : 0,
+    red: p > f200 ? p - f200 : 0,
+  };
 }
 
 function mountEnergyPriceChart() {
@@ -1386,10 +1392,16 @@ function mountEnergyPriceChart() {
   if (!points.length) return;
 
   const labels = points.map((p) => p.label);
-  const data = points.map((p) => p.price);
-  const styles = data.map((p) => energyPriceBarStyle(p));
   const maxTicks = state.priceExploreFilter === "today_tomorrow" ? 12 : 8;
   const fixed = fixedTariffForPriceCompare();
+  const segments = points.map((p) => energyPriceStackSegments(p.price, fixed));
+
+  const stackColors = {
+    green: { bg: "rgba(74, 222, 128, 0.9)", border: "rgba(34, 197, 94, 0.95)" },
+    yellow: { bg: "rgba(250, 204, 21, 0.9)", border: "rgba(234, 179, 8, 0.95)" },
+    orange: { bg: "rgba(251, 146, 60, 0.9)", border: "rgba(234, 88, 12, 0.95)" },
+    red: { bg: "rgba(248, 113, 113, 0.92)", border: "rgba(239, 68, 68, 0.95)" },
+  };
 
   state.energyPriceChart = new Chart(canvas, {
     type: "bar",
@@ -1397,11 +1409,36 @@ function mountEnergyPriceChart() {
       labels,
       datasets: [
         {
-          label: "Dynamische prijs",
-          data,
-          backgroundColor: styles.map((s) => s.bg),
-          borderColor: styles.map((s) => s.border),
+          label: "Tot vaste prijs",
+          data: segments.map((s) => s.green),
+          backgroundColor: stackColors.green.bg,
+          borderColor: stackColors.green.border,
           borderWidth: 1,
+          stack: "price",
+        },
+        {
+          label: "Boven vast tot +50%",
+          data: segments.map((s) => s.yellow),
+          backgroundColor: stackColors.yellow.bg,
+          borderColor: stackColors.yellow.border,
+          borderWidth: 1,
+          stack: "price",
+        },
+        {
+          label: "Boven +50% tot +100%",
+          data: segments.map((s) => s.orange),
+          backgroundColor: stackColors.orange.bg,
+          borderColor: stackColors.orange.border,
+          borderWidth: 1,
+          stack: "price",
+        },
+        {
+          label: "Boven +100%",
+          data: segments.map((s) => s.red),
+          backgroundColor: stackColors.red.bg,
+          borderColor: stackColors.red.border,
+          borderWidth: 1,
+          stack: "price",
         },
       ],
     },
@@ -1411,6 +1448,7 @@ function mountEnergyPriceChart() {
       plugins: {
         legend: { display: false },
         tooltip: {
+          filter: (item) => Number(item.raw) > 0,
           callbacks: {
             title(items) {
               const i = items[0]?.dataIndex;
@@ -1419,24 +1457,25 @@ function mountEnergyPriceChart() {
               return `${p.label} · ${p.interval} min slot`;
             },
             label(ctx) {
-              return `${euro(ctx.parsed.y, 4)}/kWh`;
+              if (!ctx.raw) return null;
+              return `${ctx.dataset.label}: ${euro(ctx.parsed.y, 4)}/kWh`;
             },
-            afterLabel(ctx) {
-              if (!Number.isFinite(fixed) || fixed <= 0) return "";
-              const v = ctx.parsed.y;
-              if (v < fixed) return `Onder vast (${euro(fixed, 4)}/kWh)`;
-              if (v <= fixed * 2) return `Tussen vast en 2× vast`;
-              return `Boven 2× vast (${euro(fixed * 2, 4)}/kWh)`;
+            footer(items) {
+              const i = items[0]?.dataIndex;
+              if (i == null || !points[i]) return "";
+              return `Totaal: ${euro(points[i].price, 4)}/kWh`;
             },
           },
         },
       },
       scales: {
         x: {
+          stacked: true,
           ticks: { color: "#9aa3b8", maxTicksLimit: maxTicks, font: { size: 9 } },
           grid: { color: "rgba(42,49,66,0.6)" },
         },
         y: {
+          stacked: true,
           ticks: { color: "#9aa3b8", font: { size: 10 } },
           grid: { color: "rgba(42,49,66,0.6)" },
           title: { display: true, text: "€/kWh", color: "#9aa3b8", font: { size: 11 } },
@@ -1484,11 +1523,12 @@ function renderEnergyPrices() {
         <canvas id="energyPriceChartCanvas" aria-label="Dynamische energieprijs"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-green">Onder vast (${euro(fixedTariffForPriceCompare(), 4)}/kWh)</span>
-        <span class="legend-orange">Vast t/m 2× vast</span>
-        <span class="legend-red">Boven 2× vast</span>
+        <span class="legend-green">Tot vaste prijs</span>
+        <span class="legend-yellow">Deel boven vast t/m +50%</span>
+        <span class="legend-orange">Deel boven +50% t/m +100%</span>
+        <span class="legend-red">Deel boven +100%</span>
       </div>
-      <p class="muted small">${points.length} ${modeSlot ? "slots" : "uren"} · kleuren vs vaste importprijs (Instellingen, incl. BTW)</p>`
+      <p class="muted small">${points.length} ${modeSlot ? "slots" : "uren"} · gestapelde kleuren t.o.v. vast ${euro(fixedTariffForPriceCompare(), 4)}/kWh (incl. BTW)</p>`
           : `<p class="muted">Geen marktprijsdata in deze periode. Synchroniseer marktprijzen (tab Vergelijk).</p>`
       }
     </section>

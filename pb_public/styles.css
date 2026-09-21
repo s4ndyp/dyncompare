@@ -166,6 +166,7 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 }
 .legend-orange::before { background: rgba(251, 146, 60, 0.85); }
 .legend-green::before { background: rgba(74, 222, 128, 0.85); }
+.legend-yellow::before { background: rgba(250, 204, 21, 0.9); }
 .legend-red::before { background: rgba(248, 113, 113, 0.9); }
 .legend-market::before { background: #7c9cff; }
 .legend-fixed::before { background: #f4f6fb; }

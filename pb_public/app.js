@@ -8,6 +8,14 @@ const PERIODS = {
 
 const STATS_HISTORY_DAYS = 730;
 
+const PRICE_EXPLORE_VAT_RATE = 0.21;
+
+const PRICE_EXPLORE_FILTERS = {
+  today_tomorrow: { label: "Vandaag + morgen" },
+  days7: { label: "Afgelopen 7 dagen" },
+  days30: { label: "Afgelopen 30 dagen" },
+};
+
 const AMS_TZ = "Europe/Amsterdam";
 
 function amsterdamYearMonth(date = new Date()) {
@@ -128,6 +136,12 @@ const state = {
   statsPrices: [],
   priceChart: null,
   diffChart: null,
+  energyPriceChart: null,
+  priceExploreFilter: "today_tomorrow",
+  priceExploreMarkup: true,
+  priceExploreVat: true,
+  priceExploreMode: "slot",
+  priceExploreSlots: [],
   loading: false,
   syncing: false,
   syncPollId: null,
@@ -534,6 +548,10 @@ function destroyCharts() {
   if (state.diffChart) {
     state.diffChart.destroy();
     state.diffChart = null;
+  }
+  if (state.energyPriceChart) {
+    state.energyPriceChart.destroy();
+    state.energyPriceChart = null;
   }
 }
 
@@ -1180,6 +1198,305 @@ async function refreshStatisticsView() {
   try {
     await loadSettings();
     await loadStatisticsData();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+function priceExploreRangeLabel() {
+  return PRICE_EXPLORE_FILTERS[state.priceExploreFilter]?.label || "Prijzen";
+}
+
+function priceExploreDateRange(filterKey) {
+  const now = new Date();
+  if (filterKey === "today_tomorrow") {
+    const today = amsterdamCalendarParts(now);
+    const dayAfterTomorrow = addAmsterdamCalendarDays(today, 2);
+    return {
+      start: amsterdamLocalToDate(today.year, today.month, today.day, 0, 0),
+      end: amsterdamLocalToDate(
+        dayAfterTomorrow.year,
+        dayAfterTomorrow.month,
+        dayAfterTomorrow.day,
+        0,
+        0
+      ),
+    };
+  }
+  const end = new Date(now);
+  const start = new Date(now);
+  const days = filterKey === "days30" ? 30 : 7;
+  start.setUTCDate(start.getUTCDate() - days);
+  return { start, end };
+}
+
+async function loadPriceExploreData() {
+  const { start, end } = priceExploreDateRange(state.priceExploreFilter);
+  const filter = `period_start >= "${pbFilterFrom(start)}" && period_start < "${pbFilterFrom(end)}"`;
+  const rows = await listAll("price_slots", { filter, sort: "period_start" });
+  const market = rows.filter((r) => r.source === "market");
+  state.priceExploreSlots = market.length ? market : rows;
+}
+
+function displayDynamicEnergyPrice(rawEurKwh) {
+  const raw = Number(rawEurKwh);
+  if (!Number.isFinite(raw)) return null;
+  let p = raw;
+  if (state.priceExploreMarkup) {
+    p += Number(state.settings?.market_markup_eur_kwh ?? 0);
+  }
+  if (state.priceExploreVat) {
+    p *= 1 + PRICE_EXPLORE_VAT_RATE;
+  }
+  return p;
+}
+
+function amsterdamHourBucketMs(instant) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: AMS_TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(instant)
+      .map((p) => [p.type, p.value])
+  );
+  return amsterdamLocalToDate(
+    Number(parts.year),
+    Number(parts.month),
+    Number(parts.day),
+    Number(parts.hour),
+    0
+  ).getTime();
+}
+
+function formatPriceExploreLabel(ms, compact) {
+  const d = new Date(ms);
+  if (compact) {
+    return new Intl.DateTimeFormat("nl-NL", {
+      timeZone: AMS_TZ,
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(d);
+  }
+  return formatHourLabel(d);
+}
+
+function buildSlotPriceExplorePoints() {
+  const compact = state.priceExploreFilter !== "today_tomorrow";
+  const points = [];
+  for (const row of state.priceExploreSlots || []) {
+    const start = parsePbDate(row.period_start);
+    if (!start) continue;
+    const price = displayDynamicEnergyPrice(row.price_eur_kwh);
+    if (price == null) continue;
+    const ms = start.getTime();
+    points.push({
+      ms,
+      label: formatPriceExploreLabel(ms, compact),
+      price,
+      interval: row.interval_minutes || 60,
+    });
+  }
+  points.sort((a, b) => a.ms - b.ms);
+  return points;
+}
+
+function buildHourlyPriceExplorePoints() {
+  const buckets = new Map();
+  for (const row of state.priceExploreSlots || []) {
+    const start = parsePbDate(row.period_start);
+    if (!start) continue;
+    const price = displayDynamicEnergyPrice(row.price_eur_kwh);
+    if (price == null) continue;
+    const minutes = Number(row.interval_minutes) || 60;
+    const bucket = amsterdamHourBucketMs(start);
+    const acc = buckets.get(bucket) || { weighted: 0, minutes: 0 };
+    acc.weighted += price * minutes;
+    acc.minutes += minutes;
+    buckets.set(bucket, acc);
+  }
+  const compact = state.priceExploreFilter !== "today_tomorrow";
+  return [...buckets.entries()]
+    .map(([ms, acc]) => ({
+      ms,
+      label: formatPriceExploreLabel(ms, compact),
+      price: acc.minutes > 0 ? acc.weighted / acc.minutes : null,
+      interval: 60,
+    }))
+    .filter((p) => p.price != null)
+    .sort((a, b) => a.ms - b.ms);
+}
+
+function buildPriceExplorePoints() {
+  if (state.priceExploreMode === "hour") {
+    return buildHourlyPriceExplorePoints();
+  }
+  return buildSlotPriceExplorePoints();
+}
+
+function mountEnergyPriceChart() {
+  if (typeof Chart === "undefined") {
+    toast("Grafiek-library niet geladen");
+    return;
+  }
+  const canvas = document.getElementById("energyPriceChartCanvas");
+  if (!canvas) return;
+  const points = buildPriceExplorePoints();
+  if (!points.length) return;
+
+  const labels = points.map((p) => p.label);
+  const data = points.map((p) => p.price);
+  const maxTicks = state.priceExploreFilter === "today_tomorrow" ? 12 : 8;
+
+  state.energyPriceChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Dynamische prijs",
+          data,
+          backgroundColor: "rgba(124, 156, 255, 0.78)",
+          borderColor: "#7c9cff",
+          borderWidth: 1,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title(items) {
+              const i = items[0]?.dataIndex;
+              if (i == null || !points[i]) return "";
+              const p = points[i];
+              return `${p.label} · ${p.interval} min slot`;
+            },
+            label(ctx) {
+              return `${euro(ctx.parsed.y, 4)}/kWh`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: "#9aa3b8", maxTicksLimit: maxTicks, font: { size: 9 } },
+          grid: { color: "rgba(42,49,66,0.6)" },
+        },
+        y: {
+          ticks: { color: "#9aa3b8", font: { size: 10 } },
+          grid: { color: "rgba(42,49,66,0.6)" },
+          title: { display: true, text: "€/kWh", color: "#9aa3b8", font: { size: 11 } },
+        },
+      },
+    },
+  });
+}
+
+function renderEnergyPrices() {
+  destroyCharts();
+  const points = buildPriceExplorePoints();
+  const f = state.priceExploreFilter;
+  const modeSlot = state.priceExploreMode === "slot";
+
+  appEl.innerHTML = `
+    <section class="panel">
+      <div class="segment segment-3" role="group" aria-label="Periode dynamische prijzen">
+        ${Object.entries(PRICE_EXPLORE_FILTERS)
+          .map(
+            ([key, meta]) =>
+              `<button type="button" class="segment-btn ${f === key ? "is-active" : ""}" data-price-filter="${key}">${meta.label.replace("Afgelopen ", "")}</button>`
+          )
+          .join("")}
+      </div>
+    </section>
+    <section class="card">
+      <p class="muted small">Day-ahead marktprijs (Energy-Charts/ENTSO-E). Toeslag = instelling <strong>markt-opslag</strong>; BTW = ${Math.round(PRICE_EXPLORE_VAT_RATE * 100)}% over day-ahead + toeslag (alleen weergave).</p>
+      <p class="muted small">Weergave:</p>
+      <div class="segment segment-2" role="group" aria-label="Toeslag">
+        <button type="button" class="segment-btn ${state.priceExploreMarkup ? "is-active" : ""}" data-price-markup="on">Toeslag aan</button>
+        <button type="button" class="segment-btn ${!state.priceExploreMarkup ? "is-active" : ""}" data-price-markup="off">Toeslag uit</button>
+      </div>
+      <div class="segment segment-2" role="group" aria-label="BTW">
+        <button type="button" class="segment-btn ${state.priceExploreVat ? "is-active" : ""}" data-price-vat="on">BTW aan</button>
+        <button type="button" class="segment-btn ${!state.priceExploreVat ? "is-active" : ""}" data-price-vat="off">BTW uit</button>
+      </div>
+      <div class="segment segment-2" role="group" aria-label="Tijdresolutie">
+        <button type="button" class="segment-btn ${modeSlot ? "is-active" : ""}" data-price-mode="slot">Kwartier/slot</button>
+        <button type="button" class="segment-btn ${!modeSlot ? "is-active" : ""}" data-price-mode="hour">Gem. per uur</button>
+      </div>
+      ${
+        points.length
+          ? `<div class="chart-canvas-wrap chart-canvas-wrap-week">
+        <canvas id="energyPriceChartCanvas" aria-label="Dynamische energieprijs"></canvas>
+      </div>
+      <p class="muted small">${points.length} ${modeSlot ? "slots" : "uren"} · ${modeSlot ? "Werkelijke slot-interval (o.a. 15 min)" : "Gewogen gemiddelde per kalenderuur (Europe/Amsterdam)"}</p>`
+          : `<p class="muted">Geen marktprijsdata in deze periode. Synchroniseer marktprijzen (tab Vergelijk).</p>`
+      }
+    </section>
+  `;
+
+  appEl.querySelectorAll("[data-price-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.priceFilter === state.priceExploreFilter) return;
+      state.priceExploreFilter = btn.dataset.priceFilter;
+      refreshEnergyPricesView();
+    });
+  });
+  appEl.querySelectorAll("[data-price-markup]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const on = btn.dataset.priceMarkup === "on";
+      if (on === state.priceExploreMarkup) return;
+      state.priceExploreMarkup = on;
+      render();
+    });
+  });
+  appEl.querySelectorAll("[data-price-vat]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const on = btn.dataset.priceVat === "on";
+      if (on === state.priceExploreVat) return;
+      state.priceExploreVat = on;
+      render();
+    });
+  });
+  appEl.querySelectorAll("[data-price-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const slot = btn.dataset.priceMode === "slot";
+      const mode = slot ? "slot" : "hour";
+      if (mode === state.priceExploreMode) return;
+      state.priceExploreMode = mode;
+      render();
+    });
+  });
+
+  if (points.length) {
+    requestAnimationFrame(() => {
+      if (state.energyPriceChart) {
+        state.energyPriceChart.destroy();
+        state.energyPriceChart = null;
+      }
+      mountEnergyPriceChart();
+    });
+  }
+}
+
+async function refreshEnergyPricesView() {
+  state.loading = true;
+  try {
+    await loadSettings();
+    await loadPriceExploreData();
   } catch (e) {
     toast(e.message);
   } finally {
@@ -2161,6 +2478,7 @@ function render() {
     compare: "Vergelijk",
     data: "Data",
     charts: "Grafiek",
+    energy_prices: "Dynamische prijzen",
     statistics: "Statistieken",
     settings: "Instellingen",
   };
@@ -2168,6 +2486,8 @@ function render() {
 
   if (state.view === "charts") {
     periodLabel.textContent = chartRangeTitle();
+  } else if (state.view === "energy_prices") {
+    periodLabel.textContent = priceExploreRangeLabel();
   } else if (state.view === "statistics") {
     periodLabel.textContent = `Maanden (${STATS_HISTORY_DAYS} dagen)`;
   } else {
@@ -2177,6 +2497,7 @@ function render() {
   if (state.view === "compare") renderCompare();
   else if (state.view === "data") renderData();
   else if (state.view === "charts") renderCharts();
+  else if (state.view === "energy_prices") renderEnergyPrices();
   else if (state.view === "statistics") renderStatistics();
   else renderSettings();
 }
@@ -2200,8 +2521,15 @@ document.querySelectorAll(".tab").forEach((tab) => {
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
     tab.classList.add("is-active");
     state.view = tab.dataset.view;
-    if (prev === "charts" && state.view !== "charts") destroyCharts();
+    if (
+      (prev === "charts" || prev === "energy_prices") &&
+      state.view !== "charts" &&
+      state.view !== "energy_prices"
+    ) {
+      destroyCharts();
+    }
     if (state.view === "charts") refreshChartView();
+    else if (state.view === "energy_prices") refreshEnergyPricesView();
     else if (state.view === "statistics") refreshStatisticsView();
     else render();
   });
@@ -2210,6 +2538,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
 refreshBtn?.addEventListener("click", () => {
   if (state.syncing) return;
   if (state.view === "charts") refreshChartView();
+  else if (state.view === "energy_prices") refreshEnergyPricesView();
   else if (state.view === "statistics") refreshStatisticsView();
   else refresh();
 });

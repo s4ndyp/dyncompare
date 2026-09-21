@@ -49,7 +49,7 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(6, 1fr);
   gap: 4px;
   padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
   background: color-mix(in srgb, var(--bg) 90%, transparent);
@@ -92,6 +92,20 @@ h1 { margin: 2px 0 0; font-size: 26px; }
 }
 .segment-2 {
   margin-bottom: 12px;
+}
+.segment-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 6px;
+  margin-bottom: 10px;
+}
+.segment-3 .segment-btn {
+  padding: 10px 4px;
+  font-size: 11px;
 }
 .checkbox-row {
   display: flex;

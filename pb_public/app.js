@@ -158,16 +158,21 @@ function applyTariffAmount(n) {
   return n;
 }
 
-/** Dynamisch consumententarief €/kWh (day-ahead + optionele opslag + optionele BTW). */
+/**
+ * Dynamisch consumententarief €/kWh.
+ * Day-ahead uit API is excl. BTW; markt-opslag uit Instellingen is incl. BTW.
+ * BTW aan: alleen over day-ahead, daarna incl.-opslag optellen (geen dubbele BTW).
+ */
 function dynamicRateEurKwh(rawEurKwh, markupEurKwh, opts = {}) {
   const includeMarkup = opts.includeMarkup !== false;
   const includeVat = opts.includeVat !== false;
+  const markup = includeMarkup ? Number(markupEurKwh) || 0 : 0;
   const raw = Number(rawEurKwh);
-  if (!Number.isFinite(raw)) return null;
-  let p = raw;
-  if (includeMarkup) p += Number(markupEurKwh) || 0;
-  if (includeVat) p *= 1 + MARKET_DAY_AHEAD_VAT_RATE;
-  return p;
+  if (!Number.isFinite(raw)) {
+    return includeMarkup ? markup : null;
+  }
+  const dayAhead = includeVat ? raw * (1 + MARKET_DAY_AHEAD_VAT_RATE) : raw;
+  return dayAhead + markup;
 }
 
 function dynamicEnergyCost(rawEnergyCostTotal, kwh, markupEurKwh, opts) {
@@ -1432,7 +1437,7 @@ function renderEnergyPrices() {
       </div>
     </section>
     <section class="card">
-      <p class="muted small">Day-ahead (excl. BTW uit API). Zelfde formule als Data/Vergelijk/Statistieken bij <strong>toeslag + BTW aan</strong>: (day-ahead + markt-opslag) × ${1 + MARKET_DAY_AHEAD_VAT_RATE}. Vaste tarieven blijven incl. BTW uit Instellingen.</p>
+      <p class="muted small">Day-ahead excl. BTW uit API. <strong>BTW aan</strong>: day-ahead × ${1 + MARKET_DAY_AHEAD_VAT_RATE} + opslag (opslag incl. BTW uit Instellingen — niet nogmaals belast). Zelfde als Data/Vergelijk bij toeslag + BTW aan.</p>
       <p class="muted small">Weergave:</p>
       <div class="segment segment-2" role="group" aria-label="Toeslag">
         <button type="button" class="segment-btn ${state.priceExploreMarkup ? "is-active" : ""}" data-price-markup="on">Toeslag aan</button>
@@ -2173,7 +2178,7 @@ function renderData() {
 
     <section class="card">
       <h2 class="card-title">Uren (${PERIODS[state.period].label.toLowerCase()})</h2>
-      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Beide €/kWh-kolommen zijn all-in (Instellingen + markt day-ahead + opslag).</p>
+      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Vast incl. BTW (Instellingen). Dynamisch = day-ahead × ${1 + MARKET_DAY_AHEAD_VAT_RATE} + opslag (incl. BTW) — zelfde als tab Prijzen met toeslag + BTW aan.</p>
       ${hourly.truncated ? `<p class="muted small warn-text">Toont ${hourly.rows.length} van ${hourly.total} uren met verbruik (nieuwste eerst).</p>` : ""}
       <div class="table-wrap">
         <table class="data-table data-table-hours">

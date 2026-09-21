@@ -138,12 +138,16 @@ const state = {
 
 const PRICE_SLOT_SOURCES = new Set(["market", "home_assistant", "manual"]);
 
+/** Tarieven uit Instellingen zijn all-in (incl. BTW); geen extra BTW in berekeningen. */
+function applyTariffAmount(n) {
+  return n;
+}
+
 const SETTINGS_IMPORT_FIELDS = [
   "label",
   "fixed_tariff_eur_kwh",
   "export_tariff_eur_kwh",
   "market_markup_eur_kwh",
-  "vat_rate",
   "sensor_import_t1",
   "sensor_import_t2",
   "sensor_export_t1",
@@ -458,13 +462,10 @@ function calcChartContext() {
   const settings = state.settings || {};
   const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
   const markup = Number(settings.market_markup_eur_kwh ?? 0);
-  const vat = Number(settings.vat_rate ?? 0);
-  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
   return {
     fixed,
     markup,
-    vat,
-    applyVat,
+    applyVat: applyTariffAmount,
     priceSlots: buildPriceIndex(state.chartPrices || []),
   };
 }
@@ -884,14 +885,11 @@ function calcContext() {
   const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
   const exportFixed = Number(settings.export_tariff_eur_kwh ?? 0);
   const markup = Number(settings.market_markup_eur_kwh ?? 0);
-  const vat = Number(settings.vat_rate ?? 0);
-  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
   return {
     fixed,
     exportFixed,
     markup,
-    vat,
-    applyVat,
+    applyVat: applyTariffAmount,
     priceSlots: buildPriceIndex(state.prices),
   };
 }
@@ -1027,7 +1025,6 @@ function computeSummary() {
     exportFixed,
     exportFixedAllIn: applyVat(exportFixed),
     fixedAllIn: applyVat(fixed),
-    vat: ctx.vat,
     markup,
     totalKwh,
     totalExportKwh,
@@ -1071,14 +1068,11 @@ function calcStatsContext() {
   const fixed = Number(settings.fixed_tariff_eur_kwh ?? 0.28);
   const exportFixed = Number(settings.export_tariff_eur_kwh ?? 0);
   const markup = Number(settings.market_markup_eur_kwh ?? 0);
-  const vat = Number(settings.vat_rate ?? 0);
-  const applyVat = (n) => (vat > 0 ? n * (1 + vat) : n);
   return {
     fixed,
     exportFixed,
     markup,
-    vat,
-    applyVat,
+    applyVat: applyTariffAmount,
     priceSlots: buildPriceIndex(state.statsPrices || []),
   };
 }
@@ -1163,7 +1157,7 @@ function computeMonthlyStatistics() {
     .filter((r) => r.importKwh > 0 || r.exportKwh > 0)
     .sort((a, b) => b.monthKey.localeCompare(a.monthKey));
 
-  return { rows, vat: ctx.vat };
+  return { rows };
 }
 
 async function loadStatisticsData() {
@@ -1642,7 +1636,7 @@ async function saveSettings(form) {
     fixed_tariff_eur_kwh: Number(form.fixed_tariff_eur_kwh.value),
     export_tariff_eur_kwh: Number(form.export_tariff_eur_kwh.value) || 0,
     market_markup_eur_kwh: Number(form.market_markup_eur_kwh.value) || 0,
-    vat_rate: Number(form.vat_rate.value) || 0,
+    vat_rate: 0,
     ha_url: form.ha_url.value.trim(),
     ha_token: form.ha_token.value.trim(),
     sync_service_url: form.sync_service_url.value.trim(),
@@ -1665,7 +1659,6 @@ async function saveSettings(form) {
 function renderCompare() {
   const summary = computeSummary();
   const cheaper = summary.delta > 0 ? "dynamisch" : summary.delta < 0 ? "vast" : "gelijk";
-  const vatNote = summary.vat > 0 ? ", incl. BTW" : "";
   const fixedHeroRate = summary.includeExportInAvg
     ? summary.avgFixedNet
     : summary.fixedAllIn;
@@ -1673,8 +1666,8 @@ function renderCompare() {
     ? "Vast (gewogen netto)"
     : "Vast contract (ingesteld)";
   const avgLabel = summary.includeExportInAvg
-    ? `Gewogen gemiddelde netto per geïmporteerde kWh${vatNote}`
-    : `Gewogen gemiddelde import (dynamisch)${vatNote}`;
+    ? "Gewogen gemiddelde netto per geïmporteerde kWh (incl. BTW)"
+    : "Gewogen gemiddelde import dynamisch (incl. BTW)";
 
   appEl.innerHTML = `
     <section class="panel">
@@ -1691,7 +1684,7 @@ function renderCompare() {
     <section class="hero card">
       <p class="muted">${avgLabel}</p>
       <p class="hero-value">${summary.avgDynamic != null ? euro(summary.avgDynamic, 4) : "—"}<span class="unit">/kWh</span></p>
-      <p class="muted small">${fixedHeroLabel}: <strong>${fixedHeroRate != null ? euro(fixedHeroRate, 4) : "—"}/kWh</strong>${summary.vat > 0 && !summary.includeExportInAvg ? " incl. BTW" : ""}${!summary.includeExportInAvg && summary.vat > 0 ? ` · excl. ${euro(summary.fixed, 4)}/kWh (ingesteld)` : ""}</p>
+      <p class="muted small">${fixedHeroLabel}: <strong>${fixedHeroRate != null ? euro(fixedHeroRate, 4) : "—"}/kWh</strong> incl. BTW</p>
       <p class="muted small" style="margin-top:10px">Export in gemiddelde:</p>
       <div class="segment segment-2" role="group" aria-label="Export in gewogen gemiddelde">
         <button type="button" class="segment-btn ${!summary.includeExportInAvg ? "is-active" : ""}" data-export-avg="off" ${state.syncing ? "disabled" : ""}>Alleen import</button>
@@ -1722,7 +1715,7 @@ function renderCompare() {
       <article class="card stat">
         <p class="muted">Opbrengst export vast</p>
         <p class="stat-value ok-text">${summary.totalExportKwh > 0 ? euro(summary.fixedExportRevenue) : "—"}</p>
-        <p class="muted small">${kwh(summary.totalExportKwh)} export · ${euro(summary.exportFixedAllIn, 4)}/kWh${summary.vat > 0 ? " incl. BTW" : ""}</p>
+        <p class="muted small">${kwh(summary.totalExportKwh)} export · ${euro(summary.exportFixedAllIn, 4)}/kWh incl. BTW</p>
       </article>
     </section>
 
@@ -1739,7 +1732,7 @@ function renderCompare() {
         <li>Verbruik: P1 import én export tarief 1 + 2 per uur uit Home Assistant. Export dynamisch = zelfde day-ahead + opslag als import; vast export = ingestelde vergoeding.</li>
         <li>Netto gemiddelde (knop): (totale importkosten − exportopbrengst) gedeeld door alle geïmporteerde kWh — voor vast én dynamisch.</li>
         <li>Prijzen: day-ahead NL (Energy-Charts) + optioneel HA prijssensor. Uurverbruik wordt evenredig over prijs-slots in dat uur verdeeld.</li>
-        <li>Opslag/belasting: stel <strong>markt-opslag</strong> en BTW in onder Instellingen voor vergelijkbare all-in tarieven.</li>
+        <li>Opslag: stel <strong>markt-opslag</strong> in onder Instellingen (incl. BTW), bovenop day-ahead voor vergelijkbare all-in tarieven.</li>
         ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch). Laat het veld Nordpool/HA-prijs leeg en synchroniseer opnieuw om NL day-ahead (Energy-Charts) te gebruiken — zie tab Data.</li>` : ""}
       </ul>
       <p class="muted small sync-meta">Laatste sync: ${formatSyncTimestamp(state.settings?.last_sync_at)} · ${state.settings?.last_sync_message || "—"}</p>
@@ -1854,7 +1847,7 @@ function renderData() {
 
     <section class="card">
       <h2 class="card-title">Uren (${PERIODS[state.period].label.toLowerCase()})</h2>
-      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Beide €/kWh-kolommen zijn all-in (markt-opslag + BTW uit Instellingen). Zet BTW op 0 als je vaste €0,28 al inclusief BTW is.</p>
+      <p class="muted small">Verschil = <strong>totale €</strong> vast − dynamisch dit uur: (vast €/kWh − dynamisch €/kWh) × kWh. Beide €/kWh-kolommen zijn all-in (Instellingen + markt day-ahead + opslag).</p>
       ${hourly.truncated ? `<p class="muted small warn-text">Toont ${hourly.rows.length} van ${hourly.total} uren met verbruik (nieuwste eerst).</p>` : ""}
       <div class="table-wrap">
         <table class="data-table data-table-hours">
@@ -2023,8 +2016,7 @@ function renderCharts() {
 }
 
 function renderStatistics() {
-  const { rows, vat } = computeMonthlyStatistics();
-  const vatNote = vat > 0 ? " incl. BTW" : "";
+  const { rows } = computeMonthlyStatistics();
 
   const tableRows = rows
     .map(
@@ -2044,7 +2036,7 @@ function renderStatistics() {
   appEl.innerHTML = `
     <section class="card">
       <h2 class="card-title">Maandoverzicht</h2>
-      <p class="muted small">Totalen en gewogen gemiddelde netto per geïmporteerde kWh (import − export)${vatNote}. Dynamisch = day-ahead + opslag. Per kalendermaand (Europe/Amsterdam).</p>
+      <p class="muted small">Totalen en gewogen gemiddelde netto per geïmporteerde kWh (import − export), all-in incl. BTW. Dynamisch = day-ahead + opslag uit Instellingen. Per kalendermaand (Europe/Amsterdam).</p>
       <p class="muted small">Data: laatste <strong>${STATS_HISTORY_DAYS}</strong> dagen uit de database (max. sync-periode).</p>
       <div class="table-wrap">
         <table class="data-table stats-table">
@@ -2087,19 +2079,16 @@ function renderSettings() {
   appEl.innerHTML = `
     <form class="card form" id="settingsForm">
       <h2 class="card-title">Tarief</h2>
-      <label>Vaste importprijs (€/kWh, excl. BTW)
+      <label>Vaste importprijs (€/kWh, incl. BTW)
         <input name="fixed_tariff_eur_kwh" type="number" step="0.0001" min="0" value="${s.fixed_tariff_eur_kwh ?? 0.28}" required />
       </label>
-      <label>Vaste exportvergoeding (€/kWh, excl. BTW)
+      <label>Vaste exportvergoeding (€/kWh, incl. BTW)
         <input name="export_tariff_eur_kwh" type="number" step="0.0001" min="0" value="${s.export_tariff_eur_kwh ?? 0.1}" />
       </label>
-      <label>Markt-opslag dynamisch (€/kWh)
+      <label>Markt-opslag dynamisch (€/kWh, incl. BTW)
         <input name="market_markup_eur_kwh" type="number" step="0.0001" min="0" value="${s.market_markup_eur_kwh ?? 0}" />
       </label>
-      <label>BTW (0 = 0%, 0.21 = 21%)
-        <input name="vat_rate" type="number" step="0.01" min="0" max="1" value="${s.vat_rate ?? 0}" />
-      </label>
-      <p class="muted small">Vaste én dynamische prijs krijgen dezelfde BTW in de berekening. Is je vaste tarief <strong>al inclusief BTW</strong> (typisch op je contract)? Zet BTW dan op <strong>0</strong>.</p>
+      <p class="muted small">Alle bedragen hier zijn <strong>all-in</strong> (zoals op je contract of energierekening). Day-ahead marktprijzen worden in de app aangevuld met deze opslag; er wordt geen extra BTW-percentage berekend.</p>
 
       <h2 class="card-title">Synchronisatie</h2>
       <label class="checkbox-row">

@@ -149,6 +149,9 @@ const state = {
   syncStartedAt: null,
   exportBusy: false,
   importBusy: false,
+  syncLogs: [],
+  autoSyncTimer: null,
+  autoSyncRunning: false,
 };
 
 const PRICE_SLOT_SOURCES = new Set(["market", "home_assistant", "manual"]);
@@ -194,6 +197,7 @@ const SETTINGS_IMPORT_FIELDS = [
   "market_sync_missing_only",
   "include_export_in_avg",
   "sync_include_ha",
+  "auto_sync_enabled",
   "ha_url",
 ];
 
@@ -362,6 +366,177 @@ function periodStartDate() {
 function syncDaysForPeriod() {
   const period = PERIODS[state.period];
   return Math.max(1, period.syncDays ?? period.days ?? 1);
+}
+
+function amsterdamDateKey(date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: AMS_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function calendarDaysInComparePeriod() {
+  const period = PERIODS[state.period];
+  const end = new Date();
+  const start = periodStartDate();
+  if (period.hours) return null;
+  const keys = [];
+  let cur = amsterdamCalendarParts(start);
+  const endKey = amsterdamDateKey(end);
+  for (let guard = 0; guard < 800; guard++) {
+    const key = `${cur.year}-${String(cur.month).padStart(2, "0")}-${String(cur.day).padStart(2, "0")}`;
+    keys.push(key);
+    if (key === endKey) break;
+    cur = addAmsterdamCalendarDays(cur, 1);
+  }
+  return keys;
+}
+
+function computeDataCoverage() {
+  const period = PERIODS[state.period];
+  const syncDays = syncDaysForPeriod();
+  const periodStart = periodStartDate();
+  const consumptionDays = new Set();
+  const marketDays = new Set();
+  let oldestConsumption = null;
+  let oldestMarket = null;
+
+  for (const row of state.consumption) {
+    const start = parsePbDate(row.period_start);
+    if (!start) continue;
+    if (!oldestConsumption || start < oldestConsumption) oldestConsumption = start;
+    consumptionDays.add(amsterdamDateKey(start));
+  }
+  for (const row of state.prices) {
+    const start = parsePbDate(row.period_start);
+    if (!start) continue;
+    const key = amsterdamDateKey(start);
+    if (row.source === "market") {
+      marketDays.add(key);
+      if (!oldestMarket || start < oldestMarket) oldestMarket = start;
+    }
+  }
+
+  let missingConsumptionDays = 0;
+  let missingMarketDays = 0;
+  let totalDays = 0;
+  let missingConsumptionHours = 0;
+  let expectedHours = 0;
+
+  if (period.hours) {
+    const endMs = Date.now();
+    const startMs = periodStart.getTime();
+    const consumptionHours = new Set(
+      state.consumption
+        .map((r) => parsePbDate(r.period_start)?.getTime())
+        .filter((t) => t != null && t >= startMs && t <= endMs)
+    );
+    for (let t = startMs; t <= endMs; t += 3600_000) {
+      expectedHours += 1;
+      if (!consumptionHours.has(t)) missingConsumptionHours += 1;
+    }
+  } else {
+    const dayKeys = calendarDaysInComparePeriod() || [];
+    totalDays = dayKeys.length;
+    for (const key of dayKeys) {
+      if (!consumptionDays.has(key)) missingConsumptionDays += 1;
+      if (!marketDays.has(key)) missingMarketDays += 1;
+    }
+  }
+
+  const depthMarginMs = 36 * 3600_000;
+  const haDepthShort =
+    oldestConsumption != null && oldestConsumption.getTime() > periodStart.getTime() + depthMarginMs;
+  const marketDepthShort =
+    oldestMarket != null && oldestMarket.getTime() > periodStart.getTime() + depthMarginMs;
+
+  const needsHa = missingConsumptionDays > 0 || missingConsumptionHours > 0 || haDepthShort;
+  const needsMarket =
+    missingMarketDays > 0 || (period.hours && state.prices.length === 0) || marketDepthShort;
+
+  let recommendedScope = "full";
+  let recommendedMarketMode = "missing";
+  const tips = [];
+
+  if (needsHa) {
+    recommendedScope = "full";
+    tips.push(
+      `Gebruik <strong>HA + markt</strong> en sync minstens <strong>${syncDays} dag(en)</strong> (huidige periode-knop).`
+    );
+  } else if (needsMarket) {
+    recommendedScope = "market";
+    recommendedMarketMode = "missing";
+    tips.push(
+      `Gebruik <strong>Alleen markt</strong> met <strong>Alleen ontbrekende dagen</strong> (${syncDays} dagen terug).`
+    );
+  } else {
+    tips.push("Data dekken de gekozen periode — sync alleen nodig na nieuwe dagen of bij wijziging.");
+  }
+
+  if (haDepthShort && oldestConsumption) {
+    tips.push(
+      `Oudste HA-uur: ${formatHourLabel(oldestConsumption)} — start van periode ligt eerder; verleng sync-periode (bijv. ${period.label}).`
+    );
+  }
+  if (marketDepthShort && oldestMarket) {
+    tips.push(
+      `Oudste marktprijs: ${formatHourLabel(oldestMarket)} — sync meer dagen marktprijzen voor deze periode.`
+    );
+  }
+
+  const ok = !needsHa && !needsMarket;
+
+  return {
+    ok,
+    syncDays,
+    periodLabel: period.label,
+    totalDays,
+    missingConsumptionDays,
+    missingMarketDays,
+    missingConsumptionHours,
+    expectedHours,
+    isHourPeriod: Boolean(period.hours),
+    needsHa,
+    needsMarket,
+    recommendedScope,
+    recommendedMarketMode,
+    tips,
+    oldestConsumption,
+    oldestMarket,
+  };
+}
+
+function renderDataCoverageBanner(cov) {
+  const cls = cov.ok ? "data-coverage ok" : "data-coverage warn";
+  let haLine;
+  let marketLine;
+  if (cov.isHourPeriod) {
+    haLine = cov.missingConsumptionHours
+      ? `${cov.missingConsumptionHours} van ${cov.expectedHours} uren zonder HA-verbruik`
+      : "HA-verbruik: compleet in laatste 24 uur";
+    marketLine = cov.needsMarket
+      ? "Marktprijzen: gaten in prijsdata (zie Data-tab)"
+      : "Marktprijzen: aanwezig in periode";
+  } else {
+    haLine = cov.missingConsumptionDays
+      ? `${cov.missingConsumptionDays} van ${cov.totalDays} dagen zonder HA-verbruik`
+      : `HA-verbruik: alle ${cov.totalDays} dagen in periode`;
+    marketLine = cov.missingMarketDays
+      ? `${cov.missingMarketDays} van ${cov.totalDays} dagen zonder marktprijs`
+      : `Marktprijzen: alle ${cov.totalDays} dagen in periode`;
+  }
+  const tipsHtml = cov.tips.map((t) => `<li>${t}</li>`).join("");
+  return `
+    <section class="card ${cls}">
+      <h2 class="card-title">Data-actueelheid (${cov.periodLabel})</h2>
+      <p class="muted small">${haLine}</p>
+      <p class="muted small">${marketLine}</p>
+      <p class="muted small">Sync-venster bij handmatige sync: <strong>${cov.syncDays} dag(en)</strong>.</p>
+      <ul class="notes">${tipsHtml}</ul>
+    </section>
+  `;
 }
 
 function periodSegmentLabel(key, period) {
@@ -1368,13 +1543,14 @@ const ENERGY_PRICE_BAR_COLORS = {
   red: { bg: "rgba(248, 113, 113, 0.92)", border: "rgba(239, 68, 68, 0.95)" },
 };
 
-/** Kleur van hele staaf t.o.v. vaste prijs F: groen ≤50% F, geel t/m 125% F, oranje t/m 150% F, rood daarboven. */
+/** Kleur van hele staaf t.o.v. vaste prijs F: groen ≤80% F, geel t/m 123% F, oranje t/m 150% F, rood daarboven. */
 function energyPriceBarTier(priceEurKwh, fixed) {
   if (!Number.isFinite(priceEurKwh) || priceEurKwh <= 0) return "green";
   if (!Number.isFinite(fixed) || fixed <= 0) return "green";
   const p = priceEurKwh;
   const f = fixed;
-  if (p <= f * 0.5) return "green";
+  if (p <= f * 0.8) return "green";
+  if (p <= f * 1.23) return "yellow";
   if (p <= f * 1.25) return "yellow";
   if (p <= f * 1.5) return "orange";
   return "red";
@@ -1382,8 +1558,8 @@ function energyPriceBarTier(priceEurKwh, fixed) {
 
 function energyPriceTierLabel(tier) {
   const labels = {
-    green: "Tot 50% van vaste prijs",
-    yellow: "50% t/m 125% van vaste prijs",
+    green: "Tot 80% van vaste prijs",
+    yellow: "80% t/m 123% van vaste prijs",
     orange: "125% t/m 150% van vaste prijs",
     red: "Boven 150% van vaste prijs",
   };
@@ -1497,8 +1673,8 @@ function renderEnergyPrices() {
         <canvas id="energyPriceChartCanvas" aria-label="Dynamische energieprijs"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-green">Tot 50% van vaste prijs</span>
-        <span class="legend-yellow">50% t/m 125% van vaste prijs</span>
+        <span class="legend-green">Tot 80% van vaste prijs</span>
+        <span class="legend-yellow">80% t/m 123% van vaste prijs</span>
         <span class="legend-orange">125% t/m 150% van vaste prijs</span>
         <span class="legend-red">Boven 150% van vaste prijs</span>
       </div>
@@ -1947,17 +2123,94 @@ async function persistSyncIncludeHa(includeHa) {
   state.settings.sync_include_ha = includeHa;
 }
 
-async function triggerSync() {
+function autoSyncEnabled() {
+  return Boolean(state.settings?.auto_sync_enabled);
+}
+
+async function persistAutoSyncEnabled(enabled) {
+  if (!state.settings?.id) return;
+  await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ auto_sync_enabled: enabled }),
+  });
+  state.settings.auto_sync_enabled = enabled;
+  ensureAutoSyncScheduler();
+}
+
+async function markAutoSyncDayComplete() {
+  if (!state.settings?.id) return;
+  const today = amsterdamCalendarParts(new Date());
+  const noon = amsterdamLocalToDate(today.year, today.month, today.day, 12, 0, 0);
+  const iso = `${noon.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, ".000Z")}`;
+  await pbRequest(`/api/collections/settings/records/${state.settings.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ last_auto_sync_date: iso }),
+  });
+  state.settings.last_auto_sync_date = iso;
+}
+
+function amsterdamNowParts() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: AMS_TZ,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(new Date())
+      .map((p) => [p.type, p.value])
+  );
+  return { hour: Number(parts.hour), minute: Number(parts.minute) };
+}
+
+function autoSyncAlreadyRanToday() {
+  const last = state.settings?.last_auto_sync_date;
+  if (!last) return false;
+  const d = parsePbDate(last);
+  if (!d) return false;
+  return amsterdamDateKey(d) === amsterdamDateKey(new Date());
+}
+
+function ensureAutoSyncScheduler() {
+  if (state.autoSyncTimer != null) {
+    clearInterval(state.autoSyncTimer);
+    state.autoSyncTimer = null;
+  }
+  if (!autoSyncEnabled()) return;
+  state.autoSyncTimer = setInterval(() => {
+    checkAutoSync().catch(() => {});
+  }, 60_000);
+  checkAutoSync().catch(() => {});
+}
+
+async function checkAutoSync() {
+  if (!autoSyncEnabled() || state.syncing || state.autoSyncRunning) return;
+  const { hour, minute } = amsterdamNowParts();
+  if (hour < 23 || (hour === 23 && minute < 50)) return;
+  if (autoSyncAlreadyRanToday()) return;
+  state.autoSyncRunning = true;
+  try {
+    await triggerSync({ auto: true });
+  } finally {
+    state.autoSyncRunning = false;
+  }
+}
+
+async function triggerSync(opts = {}) {
   if (state.syncing) return;
 
   const url = `${syncServiceUrl()}/sync`;
+  const auto = Boolean(opts.auto);
   const withHa = syncIncludeHa();
+  const days = auto ? Math.max(syncDaysForPeriod(), 14) : syncDaysForPeriod();
+  const marketMissingOnly = auto ? true : isMarketMissingOnly();
+
   state.syncing = true;
   state.syncStartedAt = Date.now();
   setSyncControlsDisabled(true);
   setSyncBanner(
     "busy",
-    "Synchroniseren",
+    auto ? "Automatische sync" : "Synchroniseren",
     withHa
       ? "Verbruik en prijzen ophalen (kan enkele minuten duren)…"
       : "Alleen marktprijzen ophalen (geen HA-verbruik)…"
@@ -1969,10 +2222,11 @@ async function triggerSync() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        days: syncDaysForPeriod(),
+        days,
         include_market_prices: true,
-        market_missing_only: isMarketMissingOnly(),
+        market_missing_only: marketMissingOnly,
         sync_ha: withHa,
+        trigger: auto ? "auto" : "manual",
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -1981,9 +2235,21 @@ async function triggerSync() {
     }
     await loadSettings();
     await loadData();
+    if (auto) await markAutoSyncDayComplete();
+    if (state.view === "sync_log") {
+      try {
+        await loadSyncLogs();
+      } catch (_) {
+        /* sync_logs kan ontbreken vóór migratie */
+      }
+    }
     const doneMsg = data.message || state.settings?.last_sync_message || "Sync voltooid";
     const when = formatSyncTimestamp(state.settings?.last_sync_at);
-    setSyncBanner("ok", "Synchronisatie voltooid", `${doneMsg}${when !== "—" ? ` · ${when}` : ""}`);
+    setSyncBanner(
+      "ok",
+      auto ? "Automatische sync voltooid" : "Synchronisatie voltooid",
+      `${doneMsg}${when !== "—" ? ` · ${when}` : ""}`
+    );
     toast(doneMsg, 7000);
     render();
     setTimeout(() => {
@@ -2033,8 +2299,114 @@ async function saveSettings(form) {
   await loadSettings();
 }
 
+async function loadSyncLogs() {
+  try {
+    state.syncLogs = await listAll("sync_logs", { sort: "-started_at", perPage: 200 });
+  } catch (e) {
+    state.syncLogs = [];
+    throw e;
+  }
+}
+
+async function refreshSyncLogView() {
+  state.loading = true;
+  try {
+    await loadSyncLogs();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+async function deleteSyncLogsOlderThanDays(days = 7) {
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+  const filter = `started_at < "${pbFilterFrom(cutoff)}"`;
+  const old = await listAll("sync_logs", { filter, sort: "started_at" });
+  for (const row of old) {
+    await pbRequest(`/api/collections/sync_logs/records/${row.id}`, { method: "DELETE" });
+  }
+  return old.length;
+}
+
+function syncLogTriggerLabel(value) {
+  if (value === "auto") return "Automatisch";
+  return "Handmatig";
+}
+
+function renderSyncLog() {
+  const rows = state.syncLogs;
+  const tableBody = rows.length
+    ? rows
+        .map((log) => {
+          const started = formatSyncTimestamp(log.started_at);
+          const finished = formatSyncTimestamp(log.finished_at);
+          const ok = log.status === "success";
+          const scope = log.sync_ha ? "HA + markt" : "Alleen markt";
+          const market = log.market_missing_only ? "ontbrekend" : "hele periode";
+          const detail = (log.message || log.error_detail || "—").replace(/</g, "&lt;");
+          return `<tr>
+            <td>${started}</td>
+            <td>${finished}</td>
+            <td><span class="${ok ? "ok-text" : "warn-text"}">${ok ? "OK" : "Fout"}</span></td>
+            <td>${syncLogTriggerLabel(log.trigger)}</td>
+            <td>${scope}</td>
+            <td class="num">${log.days ?? "—"}</td>
+            <td class="num">${log.consumption_hours ?? "—"}</td>
+            <td class="num">${log.price_slots ?? "—"}</td>
+            <td>${market}</td>
+            <td class="sync-log-msg">${detail}</td>
+          </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="10" class="muted">Nog geen sync-logregels — start een sync op tab Vergelijk.</td></tr>`;
+
+  appEl.innerHTML = `
+    <section class="card">
+      <h2 class="card-title">Sync-log</h2>
+      <p class="muted small">Overzicht van eerdere synchronisaties (handmatig en automatisch aan het eind van de dag).</p>
+      <div class="export-actions">
+        <button type="button" class="btn secondary" id="clearSyncLogsBtn" ${state.syncing ? "disabled" : ""}>Logs ouder dan 7 dagen wissen</button>
+      </div>
+      <div class="table-wrap table-wrap-sync-log">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Gestart</th>
+              <th>Klaar</th>
+              <th>Status</th>
+              <th>Trigger</th>
+              <th>Inhoud</th>
+              <th class="num">Dagen</th>
+              <th class="num">HA-uren</th>
+              <th class="num">Prijsslots</th>
+              <th>Markt</th>
+              <th>Bericht</th>
+            </tr>
+          </thead>
+          <tbody>${tableBody}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+
+  document.getElementById("clearSyncLogsBtn")?.addEventListener("click", async () => {
+    if (state.syncing) return;
+    try {
+      const n = await deleteSyncLogsOlderThanDays(7);
+      toast(n ? `${n} logregel(s) verwijderd` : "Geen logs ouder dan 7 dagen");
+      await refreshSyncLogView();
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+}
+
 function renderCompare() {
   const summary = computeSummary();
+  const cov = computeDataCoverage();
   const cheaper = summary.delta > 0 ? "dynamisch" : summary.delta < 0 ? "vast" : "gelijk";
   const fixedHeroRate = summary.includeExportInAvg
     ? summary.avgFixedNet
@@ -2047,6 +2419,7 @@ function renderCompare() {
     : "Gewogen gemiddelde import dynamisch (incl. BTW)";
 
   appEl.innerHTML = `
+    ${renderDataCoverageBanner(cov)}
     <section class="panel">
       <div class="segment" role="tablist" aria-label="Periode">
         ${Object.entries(PERIODS)
@@ -2113,6 +2486,12 @@ function renderCompare() {
         ${summary.missingPriceHours ? `<li class="warn-text">${summary.missingPriceHours} uren zonder prijsdata (niet meegeteld in dynamisch). Laat het veld Nordpool/HA-prijs leeg en synchroniseer opnieuw om NL day-ahead (Energy-Charts) te gebruiken — zie tab Data.</li>` : ""}
       </ul>
       <p class="muted small sync-meta">Laatste sync: ${formatSyncTimestamp(state.settings?.last_sync_at)} · ${state.settings?.last_sync_message || "—"}</p>
+      <p class="muted small">Automatische sync (einde dag, ontbrekende data):</p>
+      <div class="segment segment-2" role="group" aria-label="Automatische sync">
+        <button type="button" class="segment-btn ${autoSyncEnabled() ? "is-active" : ""}" data-auto-sync="on" ${state.syncing ? "disabled" : ""}>Aan</button>
+        <button type="button" class="segment-btn ${!autoSyncEnabled() ? "is-active" : ""}" data-auto-sync="off" ${state.syncing ? "disabled" : ""}>Uit</button>
+      </div>
+      <p class="muted small">Staat aan: na 23:50 (Amsterdam) één keer per dag sync met <strong>alleen ontbrekende</strong> markt/HA-data (min. 14 dagen terug). Zie tab Sync-log.</p>
       <p class="muted small">Sync-inhoud:</p>
       <div class="segment segment-2" role="group" aria-label="Sync inhoud">
         <button type="button" class="segment-btn ${syncIncludeHa() ? "is-active" : ""}" data-sync-scope="full" ${state.syncing ? "disabled" : ""}>HA + markt</button>
@@ -2168,6 +2547,20 @@ function renderCompare() {
       try {
         await persistIncludeExportInAvg(include);
         toast(include ? "Gemiddelde: netto incl. export" : "Gemiddelde: alleen import");
+        render();
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  });
+  appEl.querySelectorAll("[data-auto-sync]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (state.syncing) return;
+      const on = btn.dataset.autoSync === "on";
+      if (on === autoSyncEnabled()) return;
+      try {
+        await persistAutoSyncEnabled(on);
+        toast(on ? "Automatische sync aan" : "Automatische sync uit");
         render();
       } catch (e) {
         toast(e.message);
@@ -2540,6 +2933,7 @@ function render() {
     charts: "Grafiek",
     energy_prices: "Dynamische prijzen",
     statistics: "Statistieken",
+    sync_log: "Sync-log",
     settings: "Instellingen",
   };
   pageTitle.textContent = titles[state.view] || "DynCompare";
@@ -2550,6 +2944,8 @@ function render() {
     periodLabel.textContent = priceExploreRangeLabel();
   } else if (state.view === "statistics") {
     periodLabel.textContent = `Maanden (${STATS_HISTORY_DAYS} dagen)`;
+  } else if (state.view === "sync_log") {
+    periodLabel.textContent = "Synchronisaties";
   } else {
     periodLabel.textContent = PERIODS[state.period].label;
   }
@@ -2559,6 +2955,7 @@ function render() {
   else if (state.view === "charts") renderCharts();
   else if (state.view === "energy_prices") renderEnergyPrices();
   else if (state.view === "statistics") renderStatistics();
+  else if (state.view === "sync_log") renderSyncLog();
   else renderSettings();
 }
 
@@ -2567,6 +2964,7 @@ async function refresh() {
   try {
     await loadSettings();
     await loadData();
+    ensureAutoSyncScheduler();
   } catch (e) {
     toast(e.message);
   } finally {
@@ -2591,6 +2989,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     if (state.view === "charts") refreshChartView();
     else if (state.view === "energy_prices") refreshEnergyPricesView();
     else if (state.view === "statistics") refreshStatisticsView();
+    else if (state.view === "sync_log") refreshSyncLogView();
     else render();
   });
 });
@@ -2600,6 +2999,7 @@ refreshBtn?.addEventListener("click", () => {
   if (state.view === "charts") refreshChartView();
   else if (state.view === "energy_prices") refreshEnergyPricesView();
   else if (state.view === "statistics") refreshStatisticsView();
+  else if (state.view === "sync_log") refreshSyncLogView();
   else refresh();
 });
 
@@ -2613,4 +3013,7 @@ async function resumeSyncBannerIfBusy() {
   );
 }
 
-refresh().then(() => resumeSyncBannerIfBusy());
+refresh().then(() => {
+  resumeSyncBannerIfBusy();
+  ensureAutoSyncScheduler();
+});

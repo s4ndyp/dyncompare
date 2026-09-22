@@ -120,6 +120,20 @@ class PocketBaseClient:
             saved += 1
         return saved
 
+    async def create_record(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post(
+                f"{self.base_url}/api/collections/{collection}/records",
+                json=payload,
+            )
+            if not res.is_success:
+                raise httpx.HTTPStatusError(
+                    _http_error_detail(res),
+                    request=res.request,
+                    response=res,
+                )
+            return res.json()
+
     async def batch_upsert_consumption(self, rows: list[dict[str, Any]]) -> int:
         saved = 0
         for row in rows:

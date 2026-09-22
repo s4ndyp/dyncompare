@@ -1,17 +1,13 @@
 services:
   app:
-    build: .
     image: ghcr.io/s4ndyp/dyncompare:latest
-    pull_policy: build
     container_name: dyncompare
     restart: unless-stopped
     ports:
       - "8097:8090"
     volumes:
       - dyncompare_data:/app/pb_data
-
   sync:
-    build: ./sync
     image: ghcr.io/s4ndyp/dyncompare/sync:latest
     container_name: dyncompare-sync
     restart: unless-stopped
@@ -20,10 +16,7 @@ services:
     environment:
       POCKETBASE_URL: http://app:8090
       TZ: Europe/Amsterdam
-      # Optioneel: fallback als Energy-Charts geblokkeerd is (gratis token: transparency.entsoe.eu)
-      # ENTSOE_API_TOKEN: ""
     depends_on:
       - app
-
 volumes:
   dyncompare_data:

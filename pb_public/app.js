@@ -1543,14 +1543,13 @@ const ENERGY_PRICE_BAR_COLORS = {
   red: { bg: "rgba(248, 113, 113, 0.92)", border: "rgba(239, 68, 68, 0.95)" },
 };
 
-/** Kleur van hele staaf t.o.v. vaste prijs F: groen ≤80% F, geel t/m 123% F, oranje t/m 150% F, rood daarboven. */
+/** Kleur van hele staaf t.o.v. vaste prijs F: groen ≤100% F, geel t/m 125% F, oranje t/m 150% F, rood daarboven. */
 function energyPriceBarTier(priceEurKwh, fixed) {
   if (!Number.isFinite(priceEurKwh) || priceEurKwh <= 0) return "green";
   if (!Number.isFinite(fixed) || fixed <= 0) return "green";
   const p = priceEurKwh;
   const f = fixed;
-  if (p <= f * 0.8) return "green";
-  if (p <= f * 1.23) return "yellow";
+  if (p <= f) return "green";
   if (p <= f * 1.25) return "yellow";
   if (p <= f * 1.5) return "orange";
   return "red";
@@ -1558,8 +1557,8 @@ function energyPriceBarTier(priceEurKwh, fixed) {
 
 function energyPriceTierLabel(tier) {
   const labels = {
-    green: "Tot 80% van vaste prijs",
-    yellow: "80% t/m 123% van vaste prijs",
+    green: "Tot 100% van vaste prijs",
+    yellow: "100% t/m 125% van vaste prijs",
     orange: "125% t/m 150% van vaste prijs",
     red: "Boven 150% van vaste prijs",
   };
@@ -1673,8 +1672,8 @@ function renderEnergyPrices() {
         <canvas id="energyPriceChartCanvas" aria-label="Dynamische energieprijs"></canvas>
       </div>
       <div class="chart-legend">
-        <span class="legend-green">Tot 80% van vaste prijs</span>
-        <span class="legend-yellow">80% t/m 123% van vaste prijs</span>
+        <span class="legend-green">Tot 100% van vaste prijs</span>
+        <span class="legend-yellow">100% t/m 125% van vaste prijs</span>
         <span class="legend-orange">125% t/m 150% van vaste prijs</span>
         <span class="legend-red">Boven 150% van vaste prijs</span>
       </div>
